@@ -167,15 +167,19 @@ def sample_synthetic(
         seen.update(map(tuple, drop_duplicates_of[model.columns].itertuples(index=False)))
 
     kept: list[pd.DataFrame] = []
-    total = 0
+    total = drawn = on_target = 0
     for _ in range(max_rounds):
         need = n - total
+        # Size each draw from the target-match rate seen so far (1.0 until measured).
+        match_rate = max(on_target / drawn, 0.02) if drawn else 1.0
+        request = min(int(need / match_rate * 1.2) + 10, 100_000)
         batch = model.model.sample(
-            int(need * 1.3) + 10,
-            condition_column=model.target_col, condition_value=target_value,
+            request, condition_column=model.target_col, condition_value=target_value,
         )
+        drawn += len(batch)
         batch = _restore_dtypes(batch[model.columns].reset_index(drop=True), model.dtypes)
         batch = batch[batch[model.target_col] == target_value].reset_index(drop=True)
+        on_target += len(batch)
         if drop_duplicates_of is not None:
             keep = []
             for i, row in enumerate(batch.itertuples(index=False)):
@@ -191,6 +195,8 @@ def sample_synthetic(
     else:
         logger.warning("Only %d of %d valid synthetic rows after %d rounds", total, n, max_rounds)
 
+    logger.info("Sampled %d rows to keep %d; target-match rate %.1f%%",
+                drawn, total, 100 * on_target / max(drawn, 1))
     out = pd.concat(kept, ignore_index=True)
     out[IS_SYNTHETIC] = 1
     return out
