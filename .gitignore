@@ -12,6 +12,7 @@ runs/
 
 # API keys and secrets
 .env
+eda/framework_spike/benchmark_*.jsonl
 
 # Tool caches
 .pytest_cache/
