@@ -2,26 +2,31 @@
 
 Team 23, Columbia Data Science Capstone with TD Bank. Draft v0.1 for the mentor meeting on 2 October 2026. Tracks GitHub issue #4.
 
+The sections that define the contracts between agents (1, 3, 4, 5, 7, 8 and 9) were updated on 14 October 2026 to match the code in `src/agentic_gan/schemas.py` and `src/agentic_gan/orchestrator/`. The rest of the document is revised in issue #23. Paragraphs headed **Implementer notes** list what to keep in mind when building each part.
+
 ## 1. Purpose and scope
 
 This document defines the agents in the system, what each one is responsible for, what it takes in and puts out, and how the orchestrator moves a run from raw data to a final report. It is the blueprint the team builds from. It does not choose a framework (issue #13) and does not contain implementation code.
 
-The system answers one question: does GAN-generated data improve a downstream model, and can an automated pipeline decide that reliably and document the decision? To answer it, every run compares three data pipelines on the same held-out real test set:
+The system answers one question: does GAN-generated data improve a downstream model, and can an automated pipeline decide that reliably and document the decision? To answer it, every run compares four data pipelines, called arms, on the same held-out real test set. Arms are named rather than lettered, because in v0.1 the letters meant different things.
 
-| Arm | Training data | What it tells us |
+| Arm | Training data | What the comparison tells us |
 |---|---|---|
-| A. Original | Raw training split, minimal encoding only | Baseline with no data work |
-| B. Cleaned | Training split after profiling, cleaning and imputation | Value of conventional data repair |
-| C. GAN-augmented | Arm B training split plus accepted synthetic records | Value of synthetic data over and above cleaning |
+| `raw` | Real training split, encoded and scaled like `baseline` but with no repair: missing values stay missing, no placeholder or sentinel handling, no deduplication | Starting point, and the no-repair control |
+| `baseline` | Real training split after the Pre-processing Agent: cleaned, imputed, encoded and scaled, every step fitted on the training split only | `baseline` vs `raw` is the value of data repair. It is also the reference that `smote` and `gan` must beat |
+| `smote` | `baseline` training split plus SMOTE rows (SMOTENC for mixed types) at a fill level | Value of a simple oversampler |
+| `gan` | `baseline` training split plus accepted synthetic records at a fill level | `gan` vs `baseline` is the value of synthetic data. `gan` vs `smote` is whether a GAN beats a simple oversampler |
 
-An optional Arm D (SMOTE oversampling on Arm B) is worth adding, because a reviewer will ask whether a GAN beats a simple oversampler. It costs little. See open question 5.
+**Why a raw arm.** Data repair is part of the project, and without a no-repair control nothing can be credited to the Pre-processing Agent. `smote` and `gan` are built on `baseline`, so any lift from augmentation is not repair in disguise. The gap between `raw` and `baseline` should be visible where there is something to repair (Polish Bankruptcy, and the placeholders and sentinel in Bank Marketing) and small where there is not (Default of Credit Card and Credit Card Fraud have no missing values).
+
+**Fill level.** The amount of augmentation is a fill level: the share of the training class gap that is filled with extra positive rows. The class gap is the number of negatives minus the number of positives in the training split, so a fill level of 1.0 balances the classes. The default grid is 0.10, 0.25, 0.50, 0.75 and 1.00. It is set per dataset in the config because class gaps differ widely (about 20,800 rows at 1.0 for Bank Marketing, about 170,000 for Credit Card Fraud). A fill level of 0 is `baseline` itself. `smote` uses the same grid as `gan`, so the two add the same number of rows at each level. The rule is `fill_rows` in `schemas.py`: `round(fill_level * (negatives - positives))`.
 
 ## 2. Design principles
 
 1. **Deterministic where it matters, LLM where it helps.** Anything that decides the outcome of the experiment (splits, which GAN to use, whether synthetic data is accepted, which model wins) is a coded rule with logged inputs. The LLM is used for bounded tasks only (section 6).
 2. **Real data is the only evaluation data.** The train, validation and test split is made once, before any cleaning or GAN training. Synthetic records are added to the training set only. Validation and test sets never contain synthetic rows.
-3. **The GAN never sees the test set.** The generator is trained on the training split only, so a gain in Arm C cannot come from leakage.
-4. **Typed handoffs.** Each agent receives and returns a schema-validated object (Pydantic) pointing to artifacts on disk. The orchestrator rejects an output that fails validation.
+3. **The GAN never sees the test set.** The generator is trained on the training split only, so a gain in the `gan` arm cannot come from leakage.
+4. **Typed handoffs.** Each agent receives and returns a schema-validated object (Pydantic, in `src/agentic_gan/schemas.py`) pointing to artifacts on disk. The orchestrator rejects an output that fails validation.
 5. **Everything is logged.** Each decision is written with its inputs, the rule applied, and the outcome.
 6. **Failures are results.** If synthetic data fails the quality gate, the run records that and continues without augmentation. A weak or negative result is reported, as the mentors asked.
 7. **Synthetic data is always labelled.** Every synthetic file carries an `is_synthetic` column and a metadata header. It is never merged with real data without that flag.
@@ -41,7 +46,7 @@ flowchart TD
     SEL --> QE{Synthetic Data Quality<br/>Evaluation Agent<br/>gate}
     QE -- fail, attempts left --> SEL
     QE -- fail, attempts exhausted --> TRN
-    QE -- pass --> TRN[Model Training Agent<br/>Arms A, B, C]
+    QE -- pass --> TRN[Model Training Agent<br/>raw, baseline, SMOTE, GAN]
     TRN --> EVA[Evaluation Agent<br/>metrics, SHAP, segments, report]
     EVA --> OUT[Run folder: report, logs, artifacts]
 
@@ -60,10 +65,12 @@ Each run writes to `runs/<run_id>/`:
 
 ```
 runs/<run_id>/
-  config.yaml              resolved config, seeds, package versions
-  manifest.json            index of every artifact with path, hash, producing agent
+  config.yaml              resolved config (RunConfig), saved when the run is created
+  state.json               RunState: status and attempts per stage, GAN availability, volume decision
+  manifest.json            header (run id, start time, dataset and config hashes, package versions)
+                           and an index of every artifact with path, hash, producing stage
   decisions.jsonl          one line per decision: agent, rule, inputs, outcome, rationale
-  data/                    split files, cleaned files, synthetic files (is_synthetic=1)
+  data/                    split files, raw and baseline files, synthetic files (is_synthetic=1)
   profile/                 profile.json, plots
   synthetic/               generator checkpoint, attempt history
   quality/                 quality_report.json, plots
@@ -72,30 +79,53 @@ runs/<run_id>/
   report/                  final_report.md, tables
 ```
 
-A run can be reproduced from `config.yaml` and the raw file.
+A run can be reproduced from `config.yaml` and the raw file. The manifest header holds the hash of each, and the package versions that `config.yaml` does not cover.
+
+The code is in `src/agentic_gan/orchestrator/`: `create_run` makes the folder, `RunState` (`state.py`) is `state.json`, and `Manifest` (`manifest.py`) is `manifest.json`. The default run id is the dataset name plus the UTC start time. An existing run folder is never reused or overwritten.
+
+**Implementer notes.**
+
+- Write every file an agent produces inside the run folder. A path outside it, or a path to a file that does not exist, is refused when the output is registered in the manifest.
+- Put files in the subfolder that matches their kind (`data/`, `profile/`, `synthetic/`, `quality/`, `models/`, `explain/`, `report/`). The manifest does not enforce this, but later agents and the report look there.
+- A file belongs to one stage. Registering the same file again after a retry by the same stage is fine and replaces its hash. Registering it under a different stage is an error.
+- `Manifest.verify()` also checks `config.yaml`, so nothing may edit it after the run starts.
 
 ## 4. Orchestrator Agent (issue #5)
 
 **Purpose.** Run the pipeline end to end, enforce the rules in section 2, and keep the audit trail.
 
-**Inputs.** `RunConfig`: dataset path and name, target column, positive class, seed list, split ratios, quality-gate thresholds, retry limit, GAN search bounds, list of candidate models.
+**Inputs.** `RunConfig`: dataset path and name, target column, positive class (quoted in YAML, because an unquoted `yes` is read as a boolean and rejected), split ratios and seed, model seeds, excluded features, the fill-level grid, quality-gate thresholds, sanity rules, `max_attempts` (quality-gate attempts), `max_stage_retries`, GAN search bounds, candidate models, `min_rows` and whether to calibrate.
 
 **Responsibilities.**
 
-1. Validate the config and the dataset schema (column names, types, target present, row count).
-2. Create the stratified train/validation/test split (default 60/20/20, stratified on the target, fixed seed) and write it to disk. This is a tool call, not an LLM step.
+1. Validate the config (building a `RunConfig` does this) and the dataset with `validate_schema`: no duplicate or empty columns, a target that is present, has no gaps and has exactly two values, a positive class that occurs, excluded features that exist, and at least 3 rows of each class.
+2. Create the stratified train/validation/test split with `split_data` (default 60/20/20, stratified on the target, fixed seed) and write `train.csv`, `val.csv` and `test.csv` to `data/`. The split is two stratified steps: first hold out validation plus test, then divide the hold-out. The EDA row-ID files and Raghav's baseline script use the same recipe, so all of them put the same rows in each part. This is a tool call, not an LLM step.
 3. Call each sub-agent in order, validate its output object, and write a decision-log entry.
-4. Apply the gate logic: on a failed quality gate, re-invoke the Model Selection Agent with adjusted settings, up to `max_attempts` (default 3). After that, mark Arm C as `NOT_AVAILABLE` and continue.
-5. Handle failures: agent timeout, schema-validation error or exception gives one retry, then marks the stage `FAILED` and stops the run with a partial report.
+4. Apply the gate logic: on a `FAIL` verdict, re-invoke the Model Selection Agent with adjusted settings, up to `max_attempts` (default 3). After that, set `gan_available = false` with a reason and continue. Training still runs the `raw`, `baseline` and `smote` arms.
+5. Handle failures: agent timeout, schema-validation error or exception gives `max_stage_retries` retries (default 1), then marks the stage `FAILED` and stops the run with a partial report.
 6. Assemble the manifest and hand the final state to the Evaluation Agent.
 
-**Outputs.** `manifest.json`, `decisions.jsonl`, final `RunState` (status per stage, attempt counts).
+**Outputs.** `manifest.json`, `decisions.jsonl`, and the final `RunState` (`state.json`): status and attempts per stage, `gan_available` with its reason when false, and `volume_decision` (the fill level chosen by the volume rule, where 0.0 means real data only). The volume rule is issue #36. Until it exists, `volume_decision` stays unset.
 
-**Tools.** `validate_config`, `validate_schema`, `split_data`, `write_manifest`, `log_decision`, plus the sub-agents themselves.
+**Tools.** `validate_config` (building a `RunConfig` validates it), `validate_schema` and `split_data` (`orchestrator/split.py`), `write_manifest` (`Manifest.register` and `Manifest.save`), `log_decision`, plus the sub-agents themselves.
 
 **Decision logic.** Fully deterministic: stage order, retry counts, gate routing. No LLM call decides control flow.
 
-**Success.** All stages `SUCCESS` or `SKIPPED` with a reason, and a manifest in which every referenced artifact exists and its hash matches.
+**Success.** All stages `SUCCESS` or `SKIPPED` with a reason, and `Manifest.verify()` returns no problems: every referenced artifact exists and its hash matches.
+
+**Implementer notes.**
+
+- The first stage is `split_data(config, run)`, which returns a `SplitOutput`. It reads `config.dataset_path`, which must be a comma-separated CSV with a header that includes the target column. Other source formats are converted to that CSV by the dataset loaders (issue #29).
+- A dataset that fails `validate_schema` raises `SchemaError` before anything is written. That cannot change on a retry, so go straight to `FAILED` and use the message as the reason.
+- `split_data` adds a warning to `SplitOutput` for any part with fewer than 100 positives. Carry warnings into the report.
+- `split_row_ids(config, df)` returns the row labels of each part without writing any data. Use it to produce the shared row-ID files in `splits/` from the same code the orchestrator uses.
+- Check every agent output at the handoff with the output type in `STAGE_IO` (`schemas.py`), for example `STAGE_IO[Stage.PREPROCESSING][1].model_validate(raw)`. A failure counts as a stage error.
+- `RunState` is immutable. Each change returns a new state (`state.start(stage)`, `state.finish(stage, status, reason)`, `state.skip(stage, reason)`), so keep the latest one and save it to `state.json` after every change. A crash then leaves a usable partial run.
+- The state enforces stage order: a stage cannot start until every earlier stage is `SUCCESS` or `SKIPPED`. If Model Selection is skipped, skip the quality check too, with a reason.
+- `StageState.attempts` counts every invocation, including error retries and quality-gate re-runs. The gate attempt number sent to Model Selection (`ModelSelectionInput.attempt`, from 1) is a separate count.
+- Record `RETRY` (with a reason) in the state when you decide to repeat a stage after an error. Agents return `SUCCESS`, `FAILED` or `SKIPPED`.
+- Register an output in the manifest right after it passes validation, under the stage that produced it, and save the manifest.
+- In the graph, keep `RunState` as one key of the graph state and have each node return a new `RunState` (LangGraph, issue #25).
 
 ## 5. Sub-agents
 
@@ -103,7 +133,7 @@ A run can be reproduced from `config.yaml` and the raw file.
 
 **Purpose.** Produce a profiled, cleaned version of the real data and document every treatment.
 
-**Inputs.** Train, validation and test files from S0; config. The profile and the fitted treatments come from the training split only. Validation and test are transformed with the training-fitted treatments.
+**Inputs.** `PreprocessInput`: the `SplitOutput` (train, validation and test files from S0) and the config. The profile and the fitted treatments come from the training split only. Validation and test are transformed with the training-fitted treatments.
 
 **Responsibilities.**
 
@@ -124,26 +154,34 @@ A run can be reproduced from `config.yaml` and the raw file.
 | Outliers | Flag, do not remove by default. Winsorise only if a rule in the config says so |
 | Leakage-prone feature (`duration`, known only after the call) | Excluded from the model feature set by config, and documented |
 
-**Outputs.** `PreprocessOutput`: paths to the Arm A files (raw, encoded only) and Arm B files (cleaned), `profile.json`, plots, the treatment log, and the fitted transformer.
+**Outputs.** `PreprocessOutput`: two file sets, `raw` (encoded and scaled, no repair) and `baseline` (cleaned), each with train, validation and test paths; `profile.json`; plots; the treatment log; the fitted transformer with the number of rows it was fitted on; and the number of positives and negatives in the `baseline` training file.
 
 **Tools.** `profile_dataframe`, `detect_placeholders`, `impute`, `encode`, `plot_distributions`, `write_treatment_log`.
 
 **Decision logic.** Rule table above. The LLM may write the plain-language summary of the profile. It does not choose treatments.
 
-**Success.** No unresolved NaN in Arm B, every column has a treatment-log row, and train-only fitting is confirmed by the fitted transformer's recorded row count.
+**Success.** No unresolved NaN in the `baseline` files (the `raw` files keep missing values by design), every column has a treatment-log row, and train-only fitting is confirmed by the fitted transformer's recorded row count.
+
+**Implementer notes.**
+
+- `raw` and `baseline` must be encoded and scaled in the same way, so that the only difference between them is repair. Do not give one arm a different encoder, scaler or feature set. Both drop the config's excluded features (for example `duration`).
+- `raw` keeps missing values as NaN, keeps placeholders and sentinels as in the source (`pdays = -1` stays a number) and keeps duplicate rows. The scaler and encoder for `raw` must therefore tolerate NaN.
+- Fit every transformer on the training split only, for each arm separately. Record the number of training rows used in `transformer_fit_rows`. It must equal the number of rows in that arm's training file.
+- Count the positives and negatives in the `baseline` training file after any duplicate rows were dropped, and return them as `baseline_train_positives` and `baseline_train_negatives`. Fill levels are computed from these counts, not from the counts in `SplitOutput`, which describe the split before cleaning.
+- Return `SUCCESS` only when every required field is present. Otherwise return `FAILED` with a reason.
 
 ### 5.2 Model Selection Agent (issue #7)
 
 **Purpose.** Choose the right generator for the data, train it, and produce synthetic records.
 
-**Inputs.** Arm B training split and `profile.json`; the retry count and the previous attempt's quality report, if any.
+**Inputs.** `ModelSelectionInput`: the config, the `PreprocessOutput` (the `baseline` training split and `profile.json` are the data to use), the quality-gate attempt number (from 1) and, on a retry, the `QualityReport` that failed.
 
 **Responsibilities.**
 
 1. Extract data characteristics: column-type mix, row count, class imbalance, and whether a defensible temporal structure exists (an entity identifier and a time index with at least `min_steps` observations per entity).
 2. Select the generator by rule (below) and write the rationale to the decision log.
 3. Train the generator on the training split only, using conditional sampling on the target so minority-class records can be requested directly.
-4. Generate synthetic records at the requested augmentation levels (target positive rate, e.g. 20%, 35%, 50%), set `is_synthetic = 1`, and store the generator checkpoint.
+4. Generate synthetic records for each fill level in the config grid (section 1), set `is_synthetic = 1`, and store the generator checkpoint. The number of rows at a level is `fill_rows(level, positives, negatives)`, using the `baseline` class counts in the `PreprocessOutput`.
 5. On a retry, adjust training settings inside the allowed bounds using the previous quality report (more epochs, different batch size or `pac`, different discriminator steps).
 
 **Selection rules (proposed).**
@@ -157,7 +195,7 @@ A run can be reproduced from `config.yaml` and the raw file.
 
 For the primary dataset, the rules choose CTGAN. `bank-full` has no customer identifier, so no per-customer sequences exist and TimeGAN is not selected. `bank-additional-full` is date-ordered but still has no entity key. Building campaign-level sequences from it would be a modelling assumption we would have to defend, so TimeGAN stays an optional extension tied to a second dataset (issue #3).
 
-**Outputs.** `GeneratorOutput`: chosen generator, rationale, hyperparameters, checkpoint path, synthetic files per augmentation level, training-loss history.
+**Outputs.** `GeneratorOutput`: chosen generator, rationale, hyperparameters, checkpoint path, training-loss history path, and one `SyntheticSet` (fill level, row count, file path) per fill level.
 
 **Tools.** `describe_data_characteristics`, `train_ctgan`, `train_timegan`, `train_fallback_gan`, `sample_synthetic`.
 
@@ -165,11 +203,20 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 
 **Success.** Training completes, the checkpoint loads, and synthetic files match the real schema (columns, types, category sets).
 
+**Implementer notes.**
+
+- Return `SKIPPED` with a reason, not `FAILED`, when no GAN is appropriate (for example fewer than `min_rows` rows). The orchestrator then skips the quality check, sets `gan_available = false` and still runs the other arms. Return `FAILED` only when the agent itself breaks.
+- Use only the `baseline` training split. Never read validation or test data when training or sampling.
+- Compute the class gap from `baseline_train_positives` and `baseline_train_negatives` in the `PreprocessOutput`, not from the counts in `SplitOutput`, which describe the split before cleaning. `SyntheticSet.rows` is the number of rows you actually wrote. The quality check compares it with `fill_rows(...)` for that level, so it is not forced to match.
+- Return one `SyntheticSet` per fill level. Two sets at one level are rejected.
+- On a retry, `previous_report` is a `FAIL` report. Read its failing checks and keep new hyperparameters inside the config's `gan_bounds`. The schema rejects a retry without a report, a first attempt with one, and an attempt above `max_attempts`.
+- Log the selection rationale, and any hyperparameter proposal, with `log_decision`.
+
 ### 5.3 Synthetic Data Quality Evaluation Agent (issue #8)
 
 **Purpose.** Decide whether the synthetic data is good enough to train on, and say why. This agent is the gate.
 
-**Inputs.** Real training split, real held-out data (validation), synthetic files, config thresholds.
+**Inputs.** `QualityInput`: the config (thresholds in `quality_gate`, and the sanity rules), the `PreprocessOutput` (the real `baseline` training and validation files) and the `GeneratorOutput` (the synthetic files).
 
 **Checks.**
 
@@ -180,7 +227,7 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 | Utility | TSTR (train on synthetic, test on real) and TRTR (train on real, test on real), using the same classifier. Report the AUC and PR-AUC gap | Real validation split |
 | Privacy | Distance to closest record (synthetic to real training) against the same distance for real validation rows. Exact-duplicate count. | Real validation split |
 | Sanity | Category sets, value ranges, impossible combinations (rule list in config, e.g. `age >= 18`) | Schema |
-| Label balance | Achieved positive rate against the requested rate | Request |
+| Label balance | Achieved fill level against the requested fill level | Request |
 
 **Gate logic (starting values, to be calibrated on the real data in EDA).**
 
@@ -190,9 +237,9 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 - Median distance-to-closest-record for synthetic rows not smaller than for real validation rows, and zero exact duplicates of training rows.
 - Zero sanity violations after the config rule list.
 
-If any hard check fails, the gate returns `FAIL` with the failing metrics. The orchestrator then retries the Model Selection Agent, which receives this report.
+The checks run on each synthetic set, that is, at each fill level. A level passes when all of its hard checks pass. The verdict is `PASS` if at least one level passes and `FAIL` if none does. On `FAIL`, the orchestrator retries the Model Selection Agent, which receives this report with its failing metrics.
 
-**Outputs.** `QualityReport`: per-check values, thresholds, pass/fail, overall verdict, and the augmentation levels that passed. Plots: per-column real vs synthetic distributions, correlation heatmaps.
+**Outputs.** `QualityReport`: the overall `verdict` (`PASS` or `FAIL`); one `LevelReport` per fill level, holding its checks (name, value, threshold, passed, hard) and whether the level passed; the path to `quality_report.json`; and plots (per-column real vs synthetic distributions, correlation heatmaps). `passing_levels` lists the levels that passed.
 
 **Tools.** `ks_test`, `js_divergence`, `wasserstein`, `correlation_diff`, `tstr_trtr`, `dcr_privacy`, `sanity_rules`, `plot_comparison`.
 
@@ -200,52 +247,81 @@ If any hard check fails, the gate returns `FAIL` with the failing metrics. The o
 
 **Success.** All metrics computed with no NaN, and a verdict recorded with the thresholds that produced it.
 
+**Implementer notes.**
+
+- A `FAIL` verdict is a normal result. Return status `SUCCESS` with `verdict = FAIL`. Return status `FAILED` only when the agent itself breaks (a crash, or metrics that cannot be computed).
+- The schema rejects an inconsistent report. A level's `passed` must equal "all its hard checks passed", and the verdict must be `PASS` exactly when some level passed. Compute both from the thresholds. Never set them by hand.
+- Metric values must be finite. NaN and infinity are rejected, which matches the success rule above.
+- Set `hard = false` on a check that is only informative. It is reported but cannot fail a level.
+- Report each fill level in the generator output once, and no level twice.
+- For the label-balance check, take the requested rows from `fill_rows(level, ...)` with the `baseline` class counts in the `PreprocessOutput`, and compare them with `SyntheticSet.rows`.
+- Put the path of `quality_report.json` in `report_path` and the plots in `plot_paths`, so the manifest records them.
+
 ### 5.4 Model Training Agent (issue #9)
 
 **Purpose.** Train the same set of models on each arm under identical conditions.
 
-**Inputs.** Arm A and Arm B files, accepted synthetic files (if the gate passed), config.
+**Inputs.** `TrainingRequest`: the config, the `raw` and `baseline` file sets, and the accepted synthetic sets (the fill levels that passed the gate). No accepted sets means the `gan` arm is not run.
 
 **Responsibilities.**
 
-1. Build the training set for each arm: A (raw), B (cleaned), C (cleaned plus synthetic at each accepted augmentation level). Optional D (SMOTE).
+1. Build the training set for each arm: `raw`; `baseline`; `smote` (the `baseline` training split plus SMOTENC rows at each fill level in the config grid, resampled inside this agent); and `gan` (the `baseline` training split plus the accepted synthetic set at each accepted fill level).
 2. For each arm, train logistic regression, random forest, gradient boosting, XGBoost and LightGBM. Neural nets are optional.
 3. Tune with the same search budget per arm, selecting on the real validation split only.
 4. Repeat for each seed in the config (default 5) so results carry a spread.
 5. Fit probability calibration on validation if the config requests it.
 6. Save models and predictions on validation and test.
 
-**Outputs.** `TrainingOutput`: for each arm, model, seed: model path, chosen hyperparameters, validation and test predictions.
+**Raw arm and missing values (current choice, open for discussion).** `raw` keeps missing values, and some models reject NaN. Checked with scikit-learn 1.9.1: logistic regression and gradient boosting reject it, while decision tree, random forest and CatBoost accept it. XGBoost and LightGBM are documented to accept it. A model that rejects NaN is not fitted on `raw`. Its records are `SKIPPED` with the reason `model rejects NaN`, and `baseline` vs `raw` is compared on the models that ran on both. On Bank Marketing nothing needs to be skipped, because no NaN is left after encoding. Polish Bankruptcy has real missing values, so some models are skipped there. The alternative is a fixed minimal fill on `raw`, which runs every model but means `raw` is no longer untouched. To be settled with the team and the mentors.
+
+**Outputs.** `TrainingOutput`: one `ModelRecord` for each arm, fill level (`smote` and `gan` only), model and seed, with the model path, the chosen hyperparameters, and the validation and test prediction paths. A model that was not fitted has a `SKIPPED` record with a reason.
 
 **Tools.** `build_arm_dataset`, `fit_model`, `tune_model`, `calibrate`, `save_predictions`.
 
 **Decision logic.** Deterministic. Same search space, folds and budget for every arm so that arms are comparable.
 
-**Success.** Every arm, model and seed has predictions saved, and no synthetic row appears in any validation or test file (checked by the `is_synthetic` flag).
+**Success.** Every arm, fill level, model and seed has predictions saved or a `SKIPPED` record with a reason, and no synthetic or resampled row appears in any validation or test file (checked by the `is_synthetic` flag).
+
+**Implementer notes.**
+
+- A `SUCCESS` record needs its model path and both prediction paths. A `SKIPPED` or `FAILED` record needs a reason. The fill level is required for `smote` and `gan` and not allowed for `raw` and `baseline`.
+- Each combination of arm, fill level, model and seed appears once. The same model at two fill levels is fine.
+- `TrainingOutput` cannot be `SUCCESS` if any record is `FAILED`. Skipped records are fine.
+- Add SMOTE rows to the `baseline` training split only, with `fill_rows(level, positives, negatives)` using that file's class counts (the ones the `PreprocessOutput` reports), so `smote` and `gan` add the same number of rows at each level. Never resample validation or test.
+- Use the same search space, folds and budget for every arm, so that a difference between arms comes from the data and not from tuning. Select on the real validation split only.
+- The grid is large: by default 5 fill levels for each of 2 augmented arms, times models and seeds, before tuning. The Credit Card Fraud grid reaches about 170,000 synthetic rows. Plan the compute before running it.
 
 ### 5.5 Evaluation Agent (issue #10)
 
 **Purpose.** Turn the predictions into a comparison across arms, explain the models, and produce the report.
 
-**Inputs.** `TrainingOutput`, `QualityReport`, treatment log, decision log, manifest.
+**Inputs.** `EvaluationInput`: the config, the `TrainingOutput`, the `QualityReport` (none if no generator ran), and the paths to the treatment log, decision log, manifest and `state.json`. The state file says whether the `gan` arm was available (and why not) and which fill level the volume rule chose, if it ran.
 
 **Responsibilities.**
 
 1. Predictive metrics on the real test set: ROC-AUC, PR-AUC, precision, recall, F1, lift at top decile, KS statistic, calibration (Brier score, reliability curve), train-test gap. Mean and standard deviation across seeds.
-2. Arm comparison: difference of each arm from A and from B, with a paired test or confidence interval across seeds. State plainly when a difference is within noise.
+2. Arm comparison: `baseline` vs `raw` (the value of repair), `smote` vs `baseline`, `gan` vs `baseline` and `gan` vs `smote`, at matched fill levels, with a paired test or confidence interval across seeds. State plainly when a difference is within noise.
 3. Explainability: SHAP for the best model per arm. Compare feature-importance rankings across arms (rank correlation of mean absolute SHAP), and list features whose rank changes by more than a set margin.
 4. Segment analysis: metrics by age band, job, marital status and education, to look for bias amplification or segments where augmentation hurts.
 5. Report generation: the final report, built from the result files.
 
 **Report rules.** The LLM writes prose from structured result files only. Every number in the report is inserted from a result file by a template or checked against one, and a check script fails the run if a quoted number is not found in the results. The report must include a section on negative or inconclusive results, the data-treatment log, the quality report, limitations, and the ethical statements from the proposal.
 
-**Outputs.** `final_report.md` (and PDF export), model comparison table, SHAP plots, segment tables.
+**Outputs.** `EvaluationOutput`: the metrics tables, the path to `final_report.md` (and PDF export), and whether the report numbers were verified. Also the SHAP plots and segment tables.
 
 **Tools.** `compute_metrics`, `compare_arms`, `shap_analysis`, `segment_metrics`, `render_report`, `verify_report_numbers`.
 
 **Decision logic.** Deterministic for numbers and comparisons. The LLM writes the narrative within the fixed report outline.
 
-**Success.** Report generated, number verification passes, all required sections present.
+**Success.** Report generated, number verification passes, all required sections present. `numbers_verified` must be true: an output with status `SUCCESS` and unverified numbers is rejected, so if verification fails, return `FAILED` with a reason.
+
+**Implementer notes.**
+
+- Compare `raw` and `baseline` only on the models fitted in both arms, and say which models could not run on `raw` and why (their `SKIPPED` records). Report the repair comparison per dataset: only datasets with something to repair (Bank Marketing placeholders, Polish Bankruptcy missing values) are expected to show a gap.
+- If `gan_available` is false, give the recorded reason and leave the `gan` arm out of the comparisons. A missing arm is not an error.
+- If `volume_decision` is set, report the fill level and its reason. If it is unset, say that the volume rule did not run.
+- Write the report and tables inside the run folder (`report/`) and list them in the output, so the manifest records them.
+- The Credit Card Fraud validation and test sets hold about 100 positives each, so one missed case moves recall by about a point. Say plainly when a difference is within noise.
 
 ## 6. Where the LLM is used
 
@@ -262,37 +338,66 @@ This split is deliberate. It keeps the experiment reproducible, makes the agent 
 
 ## 7. Handoff contracts
 
-| From | To | Object | Key fields |
-|---|---|---|---|
-| Orchestrator | Pre-processing | `SplitOutput` | train/val/test paths, target, seed |
-| Pre-processing | Model Selection | `PreprocessOutput` | arm A/B paths, profile path, treatment log |
-| Model Selection | Quality Evaluation | `GeneratorOutput` | generator, rationale, checkpoint, synthetic paths |
-| Quality Evaluation | Orchestrator | `QualityReport` | metrics, thresholds, verdict, passing augmentation levels |
-| Orchestrator | Model Training | `TrainingRequest` | arm file paths, accepted synthetic paths or none |
-| Model Training | Evaluation | `TrainingOutput` | models, predictions per arm, model, seed |
-| Evaluation | Orchestrator | `EvaluationOutput` | metrics tables, report path, verification status |
+Every handoff is a Pydantic model in `src/agentic_gan/schemas.py`. Each stage takes one input object and returns one output object. `STAGE_IO` in that module lists the pair for each stage, so the orchestrator can check a handoff by looking the stage up.
 
-Every object has a `status` field (`SUCCESS`, `RETRY`, `FAILED`, `SKIPPED`), a `warnings` list and the artifact paths. These are Pydantic models in a shared `schemas` module.
+| Stage | Takes | Returns |
+|---|---|---|
+| split (orchestrator, S0) | `RunConfig` | `SplitOutput` |
+| preprocessing | `PreprocessInput`: config, `SplitOutput` | `PreprocessOutput` |
+| model_selection | `ModelSelectionInput`: config, `PreprocessOutput`, `attempt`, `previous_report` | `GeneratorOutput` |
+| quality_check | `QualityInput`: config, `PreprocessOutput`, `GeneratorOutput` | `QualityReport` |
+| training | `TrainingRequest`: config, `raw` and `baseline` files, accepted synthetic sets | `TrainingOutput` |
+| evaluation | `EvaluationInput`: config, `TrainingOutput`, `QualityReport`, log, manifest and state paths | `EvaluationOutput` |
+
+Key fields of the outputs:
+
+| Object | Key fields |
+|---|---|
+| `SplitOutput` | train, validation and test paths, target, seed, positive and negative counts in the training split |
+| `PreprocessOutput` | `raw` and `baseline` file sets, profile path, plots, treatment log, fitted transformer and its fit row count, `baseline` class counts |
+| `GeneratorOutput` | generator, rationale, hyperparameters, checkpoint, loss history, one synthetic set (fill level, rows, path) per fill level |
+| `QualityReport` | verdict, one report per fill level (checks with value, threshold, passed, hard), report path, passing levels |
+| `TrainingOutput` | one record per arm, fill level, model and seed: model and prediction paths, hyperparameters |
+| `EvaluationOutput` | metrics tables, report path, whether the numbers were verified |
+
+Rules that apply to every output:
+
+- It has a `status` (`SUCCESS`, `RETRY`, `FAILED` or `SKIPPED`), a `warnings` list, an optional `reason` and the artifact paths. Only outputs have a status. Inputs and helper records do not.
+- `FAILED` and `SKIPPED` need a `reason`. `SUCCESS` must carry its payload (files, counts, verdict). A `FAILED` or `SKIPPED` output may carry nothing else, so a failed stage can still return a valid object.
+- Agents return `SUCCESS`, `FAILED` or `SKIPPED`. The orchestrator records `RETRY` in the run state when it decides to repeat a stage.
+- A quality-gate `FAIL` is a result, not a failed stage. It is the `verdict` of a `SUCCESS` report.
+- An input refuses an upstream output that is not `SUCCESS`.
+- `artifact_paths()` lists every file in an output, nested ones included, and the orchestrator passes it to the manifest. Paths are relative to the run folder, or absolute inside it.
+- Schemas describe data and never read the disk. Whether a file exists, and whether its hash matches, is checked by the manifest.
+- Objects are immutable and unknown fields are rejected. `obj.updated(field=value)` returns a changed copy that is validated again.
+
+**Implementer notes.**
+
+- Adding or renaming a field is a change to `schemas.py` that other people build on. Open a pull request, say what changed in the team channel, and update this section.
+- Start from your stage's output class. Build an output that is not `SUCCESS` from a `status` and a `reason` only, for example `GeneratorOutput(status=Status.SKIPPED, reason="...")`.
+- A validation error on your own output means it breaks one of the rules above. Fix the object. Do not loosen the schema without asking.
 
 ## 8. Failure handling
 
 | Failure | Response |
 |---|---|
-| Schema validation fails on an agent output | One retry of that agent, then stage `FAILED` |
-| Quality gate fails | Retry Model Selection up to `max_attempts` with adjusted settings. Then Arm C is `NOT_AVAILABLE`, the run continues, and the report states why |
+| Schema validation fails on an agent output, or a listed file is missing or outside the run folder | Treated as a stage error: `max_stage_retries` retries of that agent (default 1), then stage `FAILED` |
+| Quality gate returns `FAIL` (a result, not a stage failure) | Retry Model Selection up to `max_attempts` with adjusted settings. Then `gan_available = false` with a reason, the run continues with the `raw`, `baseline` and `smote` arms, and the report states why |
+| The dataset does not match the config (`SchemaError` from `validate_schema`) | Not retried, because the data will not change. Stage `FAILED` with the message as the reason |
 | GAN training diverges or collapses (loss non-finite, near-constant output) | Counts as a failed attempt |
-| Dataset too small or no valid generator for the data | Skip generation, record the reason |
-| Arm C does not beat Arm B | Not an error. Reported as a result |
-| Any stage `FAILED` | Stop, write a partial report with the decision log |
+| Dataset too small or no valid generator for the data | Model Selection returns `SKIPPED` with the reason, the quality check is skipped, and `gan_available = false` |
+| A model cannot run on the `raw` arm (it rejects NaN) | Recorded as a `SKIPPED` model record with the reason. Not an error |
+| The `gan` arm does not beat `baseline` or `smote` | Not an error. Reported as a result |
+| Any stage `FAILED` | Stop, write a partial report with the decision log. `state.json` and the manifest show how far the run got |
 
 ## 9. Example run: Bank Marketing
 
-1. S0: load `bank-full.csv` (45,211 rows, 17 inputs, about 11.7% positive). Validate schema, split 60/20/20 stratified.
-2. Pre-processing: profile; keep `unknown` as a category for `poutcome`, treat `pdays = -1` as a sentinel, decide on `job`, `education` and `contact` unknowns by the rules, exclude `duration` from modelling features. Produce Arm A and Arm B files and the treatment log.
-3. Model Selection: no entity or time key, mixed types, enough rows, so CTGAN. Train on the cleaned training split with conditional sampling on `y`. Generate sets at 20%, 35% and 50% positive rate.
-4. Quality Evaluation: run the checks for each set. Suppose the 50% set fails the TSTR check and the others pass. Passing levels go forward and the failure is recorded.
-5. Model Training: train five models by five seeds on A, B, C20 and C35 (and D if included) with identical search budgets.
-6. Evaluation: test-set metrics with spread, arm comparison, SHAP stability, segment tables, report with a limitations section.
+1. S0: load `bank-full.csv` (45,211 rows, 17 inputs, about 11.7% positive). Validate schema, split 60/20/20 stratified. The training split has 3,173 positives and 23,953 negatives, so the class gap is 20,780. Bank Marketing has no duplicate rows, so the `baseline` counts are the same. On a dataset where cleaning drops duplicates they would differ, and the `baseline` counts are the ones that count.
+2. Pre-processing: profile; keep `unknown` as a category for `poutcome`, treat `pdays = -1` as a sentinel, decide on `job`, `education` and `contact` unknowns by the rules, exclude `duration` from modelling features. Produce the `raw` and `baseline` files and the treatment log.
+3. Model Selection: no entity or time key, mixed types, enough rows, so CTGAN. Train on the `baseline` training split with conditional sampling on `y`. Generate one set per fill level: 0.10, 0.25, 0.50, 0.75 and 1.00 of the gap, which is 2,078, 5,195, 10,390, 15,585 and 20,780 rows.
+4. Quality Evaluation: run the checks for each set. Suppose the 1.00 set fails the TSTR check and the others pass. The verdict is `PASS`, the passing levels go forward and the failure is recorded.
+5. Model Training: train five models by five seeds on `raw`, `baseline`, `smote` at each fill level and `gan` at each passing level, with identical search budgets. On Bank Marketing no model needs to be skipped on `raw`, because no NaN is left after encoding. When the volume rule exists (issue #36), the orchestrator then applies it to pick the smallest fill level with a reliable lift, or none, and records it as `volume_decision`.
+6. Evaluation: test-set metrics with spread, the four arm comparisons, SHAP stability, segment tables, report with a limitations section.
 
 ## 10. Mapping to workstreams
 
@@ -317,13 +422,13 @@ The design is a fixed graph of stages with one conditional loop (the quality gat
 ## 12. Open questions for the mentors
 
 1. The meeting notes list DCGAN for non-time-series data. DCGAN is designed for images. For tabular data the candidates are CTGAN, TableGAN and WGAN-GP. Should we exclude DCGAN, or is an image dataset in scope?
-2. `bank-full` has few true missing values (mostly `unknown` placeholders). To test the "data repair" part of the project title, may we inject controlled missingness (MCAR and MAR at 5%, 15%, 30%) into the real data and measure how well each repair method and the GAN recover it? Otherwise Arm B differs little from Arm A.
+2. `bank-full` has few true missing values (mostly `unknown` placeholders). To test the "data repair" part of the project title, may we inject controlled missingness (MCAR and MAR at 5%, 15%, 30%) into the real data and measure how well each repair method and the GAN recover it? Otherwise `baseline` differs little from `raw`.
 3. Should `duration` be excluded from modelling? The UCI documentation says it is not known before a call and makes a model unrealistic. We propose excluding it and reporting a with-duration run as a sensitivity check.
 4. Which second dataset should carry the TimeGAN extension? We need an entity key and a time index. It would be useful to hear whether TD has a public dataset in mind. (Issue #3.)
-5. Is a SMOTE arm (Arm D) acceptable as a baseline against the GAN?
+5. Answered by the mentor feedback of 9 October: SMOTE is an arm (`smote`) and the GAN has to beat it.
 6. Quality-gate thresholds are our starting values. Are there fidelity or utility thresholds TD uses that we should adopt instead?
 7. Does the Model Selection Agent also own GAN training, as in the meeting notes, or should GAN training be a separate agent?
-8. Compute: is the $100 per person in Google Cloud credit sufficient for CTGAN across seeds and augmentation levels, or should we plan for a smaller grid?
+8. Compute: is the $100 per person in Google Cloud credit sufficient for CTGAN across seeds and fill levels, or should we plan for a smaller grid?
 
 ## 13. Next steps
 
