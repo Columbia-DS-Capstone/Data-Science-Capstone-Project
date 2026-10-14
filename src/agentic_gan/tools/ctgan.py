@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import pickle
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,8 @@ class TrainedCTGAN:
     loss_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     train_seconds: float = 0.0
     n_train_rows: int = 0
+    numeric_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
+    integer_valued: list[str] = field(default_factory=list)
 
 
 def _infer_discrete(df: pd.DataFrame, target_col: str) -> list[str]:
@@ -127,15 +129,23 @@ def train_ctgan(
     logger.info("CTGAN trained in %.1fs; final losses G=%.3f D=%.3f", seconds,
                 losses["Generator Loss"].iloc[-1], losses["Discriminator Loss"].iloc[-1])
 
+    numeric = [c for c in df.columns if c not in discrete and pd.api.types.is_numeric_dtype(df[c])]
     return TrainedCTGAN(
         model=model, target_col=target_col, discrete_columns=discrete,
         columns=df.columns.tolist(), dtypes={c: str(t) for c, t in df.dtypes.items()},
         params=params, loss_history=losses, train_seconds=seconds, n_train_rows=len(df),
+        numeric_ranges={c: (float(df[c].min()), float(df[c].max())) for c in numeric},
+        integer_valued=[c for c in numeric if bool((df[c] == df[c].round()).all())],
     )
 
 
-def _restore_dtypes(sample: pd.DataFrame, dtypes: Mapping[str, str]) -> pd.DataFrame:
-    for col, dtype in dtypes.items():
+def _restore_dtypes(sample: pd.DataFrame, model: TrainedCTGAN) -> pd.DataFrame:
+    """Clip numeric columns to the training range and round whole-number columns."""
+    for col, (low, high) in model.numeric_ranges.items():
+        sample[col] = sample[col].clip(low, high)
+    for col in model.integer_valued:
+        sample[col] = sample[col].round()
+    for col, dtype in model.dtypes.items():
         if dtype.startswith(("int", "uint")):
             sample[col] = sample[col].round().astype(dtype)
     return sample
@@ -147,12 +157,16 @@ def sample_synthetic(
     target_value: Any = 1,
     seed: int | None = None,
     drop_duplicates_of: pd.DataFrame | None = None,
+    row_filter: Callable[[pd.DataFrame], pd.Series] | None = None,
     max_rounds: int = 20,
 ) -> pd.DataFrame:
     """Return exactly ``n`` synthetic rows of ``target_col == target_value`` with is_synthetic=1.
 
     Sampling is conditional on the target, so minority rows are requested directly.
-    Integer columns are rounded back to their training dtype. If ``drop_duplicates_of``
+    Numeric columns are clipped to their training range and whole-number columns are
+    rounded. ``row_filter`` takes a batch and returns a boolean mask of rows to keep, for
+    dataset rules such as "these two columns must agree" (rejected rows are resampled).
+    If ``drop_duplicates_of``
     is given (e.g. the real training split, same columns), rows that exactly copy a real
     row or an earlier synthetic row are dropped and resampled, up to ``max_rounds``.
     CTGAN's conditioning is soft, so rows with the wrong target value are also dropped.
@@ -167,19 +181,22 @@ def sample_synthetic(
         seen.update(map(tuple, drop_duplicates_of[model.columns].itertuples(index=False)))
 
     kept: list[pd.DataFrame] = []
-    total = drawn = on_target = 0
+    total = drawn = on_target = usable = 0
     for _ in range(max_rounds):
         need = n - total
-        # Size each draw from the target-match rate seen so far (1.0 until measured).
-        match_rate = max(on_target / drawn, 0.02) if drawn else 1.0
+        # Size each draw from the share of rows that survive so far (1.0 until measured).
+        match_rate = max(usable / drawn, 0.02) if drawn else 1.0
         request = min(int(need / match_rate * 1.2) + 10, 100_000)
         batch = model.model.sample(
             request, condition_column=model.target_col, condition_value=target_value,
         )
         drawn += len(batch)
-        batch = _restore_dtypes(batch[model.columns].reset_index(drop=True), model.dtypes)
+        batch = _restore_dtypes(batch[model.columns].reset_index(drop=True), model)
         batch = batch[batch[model.target_col] == target_value].reset_index(drop=True)
         on_target += len(batch)
+        if row_filter is not None:
+            batch = batch[row_filter(batch).to_numpy()].reset_index(drop=True)
+        usable += len(batch)
         if drop_duplicates_of is not None:
             keep = []
             for i, row in enumerate(batch.itertuples(index=False)):
@@ -195,8 +212,8 @@ def sample_synthetic(
     else:
         logger.warning("Only %d of %d valid synthetic rows after %d rounds", total, n, max_rounds)
 
-    logger.info("Sampled %d rows to keep %d; target-match rate %.1f%%",
-                drawn, total, 100 * on_target / max(drawn, 1))
+    logger.info("Sampled %d rows to keep %d; target-match rate %.1f%%, passed row_filter %.1f%%",
+                drawn, total, 100 * on_target / max(drawn, 1), 100 * usable / max(on_target, 1))
     out = pd.concat(kept, ignore_index=True)
     out[IS_SYNTHETIC] = 1
     return out

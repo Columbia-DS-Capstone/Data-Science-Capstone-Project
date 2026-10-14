@@ -69,3 +69,12 @@ def test_nan_raises_and_fill_works(df):
 def test_fill_counts():
     y = pd.Series([0] * 23953 + [1] * 3173)
     assert fill_counts(y) == {0.10: 2078, 0.25: 5195, 0.50: 10390}
+
+
+def test_sample_clipped_rounded_and_filtered(trained, df):
+    lo, hi = df["income"].min(), df["income"].max()
+    out = sample_synthetic(trained, 30, row_filter=lambda b: b["age"] >= 40)
+    assert len(out) == 30
+    assert (out["age"] >= 40).all()
+    assert out["income"].between(lo, hi).all()
+    assert "age" in trained.integer_valued and "income" not in trained.integer_valued

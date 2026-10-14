@@ -34,6 +34,18 @@ ARTIFACT_DIR = ROOT / "eda" / "ctgan_bank" / "artifacts"
 PDAYS_SENTINEL = -1
 
 
+def consistent_rows(df):
+    """Bank rules that hold for every real training row but that CTGAN does not enforce.
+
+    ``previously_contacted`` must agree with ``previous`` and ``pdays``, and ``pdays`` is
+    either the -1 sentinel or at least 1 day.
+    """
+    contacted = df["previously_contacted"] == 1
+    never = df["pdays"] == PDAYS_SENTINEL
+    agrees = (never == ~contacted) & ((df["previous"] > 0) == contacted)
+    return agrees & (never | (df["pdays"] >= 1))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=300)
@@ -49,6 +61,9 @@ def main() -> None:
     # Temporary adapter: CTGAN cannot take NaN. previously_contacted keeps the information.
     train_filled = train.fillna({"pdays": PDAYS_SENTINEL})
 
+    real_pass = float(consistent_rows(train_filled).mean())
+    assert real_pass == 1.0, f"consistency rules fail on {1 - real_pass:.2%} of real rows"
+
     SYNTHETIC_DIR.mkdir(parents=True, exist_ok=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -61,11 +76,10 @@ def main() -> None:
     counts = fill_counts(data.y_train)
     largest = max(counts.values())
     pool = sample_synthetic(model, largest, target_value=1, seed=args.seed,
-                            drop_duplicates_of=train_filled)
+                            drop_duplicates_of=train_filled, row_filter=consistent_rows)
 
     # Restore the NaN that was filled in for training: never-contacted customers.
-    never_contacted = pool["previously_contacted"] == 0
-    pool.loc[never_contacted, "pdays"] = np.nan
+    pool.loc[pool["pdays"] == PDAYS_SENTINEL, "pdays"] = np.nan
 
     # Nested subsets: the 10% and 25% files are the first rows of the 50% file.
     written = {}
