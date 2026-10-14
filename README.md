@@ -64,3 +64,75 @@ Add team member names, faculty advisor, and industry mentor here.
 License / Usage
 
 This project was created for academic purposes. Usage of project code, data, or derived artifacts should comply with Columbia University requirements, applicable licenses, and any confidentiality or data-use agreements associated with the industry-sponsored capstone.
+
+## Shared preprocessing
+
+One script prepares Bank Marketing, Default, and Polish Bankruptcy data:
+`src/agentic_gan/tools/preprocessing.py`.
+
+### Configuration
+
+Edit [datasets.json](src/agentic_gan/utils/datasets.json) to set each dataset's input path, target column, categorical columns, imputation method, and split settings. Defaults are stratified **60% training / 20% validation / 20% test**, **seed 42**, and **median imputation**. Bank's post-call `duration` feature is excluded by default.
+
+Place the raw inputs at the configured paths (relative to the repo root):
+
+| Dataset | Default input |
+|---|---|
+| Bank Marketing | `data/raw/bank_marketing.csv` |
+| Default | `data/raw/default.csv` |
+| Polish Bankruptcy | `data/raw/polish_companies_bankruptcy_uci365.zip` |
+
+The script reads local inputs; it does not download them. See the [input format details](docs/preprocessing.md) before preparing the files.
+
+### Run
+
+After `uv sync`, run from the repo root:
+
+```bash
+uv run python -m agentic_gan.tools.preprocessing --dataset bank_marketing
+uv run python -m agentic_gan.tools.preprocessing --dataset default
+uv run python -m agentic_gan.tools.preprocessing --dataset polish
+```
+
+The script generates splits directly from the config. The same input rows in the same order, settings, and software versions reproduce the same splits. Imputation, category encoding, and scaling are learned **only from training rows**.
+
+Optional overrides include `--config /path/to/datasets.json`, `--input /path/to/source`, `--imputation mean`, and `--include-duration` for a post-call Bank diagnostic.
+
+### Outputs
+
+Results are written to `data/interim/<dataset>/`:
+
+| Files | Purpose |
+|---|---|
+| `train_cleaned.csv`, `validation_cleaned.csv`, `test_cleaned.csv` | Cleaned data before encoding/scaling; use the training table for GAN training |
+| `train_encoded.csv`, `validation_encoded.csv`, `test_encoded.csv` | Encoded and scaled data for predictive models |
+| `preprocessor.pkl` | Saved preprocessing settings fitted on training data, reusable on synthetic rows |
+| `treatment_log.csv` | Per-column issues, treatments, and reasons |
+
+The output folder also contains a training profile, missingness masks, a reproducibility manifest, and a category-code audit for Default. Rerunning replaces generated outputs. Exclude the `source_row` identifier from model features. Raw inputs and generated outputs are ignored by Git.
+
+Fraud preprocessing is deferred.
+
+See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and reuse of the saved preprocessing on synthetic data.
+
+## Baseline models
+
+Compare original and cleaned data with nine models. Use Python 3.12 and `uv sync --frozen` first:
+
+```bash
+uv run python -m agentic_gan.tools.baselines --dataset default --arm both
+uv run python -m agentic_gan.tools.baselines --dataset polish --arm both
+uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both
+```
+
+Omit `--arm both` to run only the cleaned arm. Each command uses the shared dataset configuration and raw inputs, with training-only preprocessing and three-fold training CV. Selection uses validation PR-AUC; the selected model receives test PR-AUC, ROC-AUC, F1, precision, recall, and accuracy. The compact `results/baselines.csv` contains validation PR-AUC, training CV PR-AUC mean/SD, and selected-model test metrics. Per-run JSON files retain full metrics, warnings, model settings, source/split hashes, and package versions. Seed defaults to 42 and CV folds to 3. Results accumulate in the CSV; matching dataset/arm/seed/CV runs are replaced on rerun. Run commands sharing this file sequentially.
+
+The Training Agent and synthetic-data experiments can reuse:
+
+```python
+from agentic_gan.tools.baselines import run_models
+
+results = run_models(X_train, y_train, X_val, y_val, X_test, y_test, seed=42)
+```
+
+Pass encoded features, or supply an unfitted `preprocessor=` for raw data. Synthetic rows belong only in the training inputs. See [baseline results and comparison notes](docs/notes/baselines.md) for measured results and comparison conventions.

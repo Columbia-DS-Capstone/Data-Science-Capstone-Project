@@ -1,0 +1,126 @@
+{
+  "rows": 18000,
+  "duplicate_rows": 14,
+  "columns": {
+    "LIMIT_BAL": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 77
+    },
+    "SEX": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 2
+    },
+    "EDUCATION": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 7
+    },
+    "MARRIAGE": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 4
+    },
+    "AGE": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 55
+    },
+    "PAY_1": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 11
+    },
+    "PAY_2": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 10
+    },
+    "PAY_3": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 11
+    },
+    "PAY_4": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 11
+    },
+    "PAY_5": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 10
+    },
+    "PAY_6": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 10
+    },
+    "BILL_AMT1": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 14464
+    },
+    "BILL_AMT2": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 14262
+    },
+    "BILL_AMT3": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 14031
+    },
+    "BILL_AMT4": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 13773
+    },
+    "BILL_AMT5": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 13407
+    },
+    "BILL_AMT6": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 13138
+    },
+    "PAY_AMT1": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 5768
+    },
+    "PAY_AMT2": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 5757
+    },
+    "PAY_AMT3": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 5451
+    },
+    "PAY_AMT4": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 5063
+    },
+    "PAY_AMT5": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 4926
+    },
+    "PAY_AMT6": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 4941
+    },
+    "y": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 2
+    }
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "rows": 27126,
+  "duplicate_rows": 0,
+  "columns": {
+    "age": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 77
+    },
+    "job": {
+      "dtype": "str",
+      "missing": 176,
+      "unique": 11
+    },
+    "marital": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 3
+    },
+    "education": {
+      "dtype": "str",
+      "missing": 1135,
+      "unique": 3
+    },
+    "default": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 2
+    },
+    "balance": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 5909
+    },
+    "housing": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 2
+    },
+    "loan": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 2
+    },
+    "contact": {
+      "dtype": "str",
+      "missing": 7813,
+      "unique": 2
+    },
+    "day_of_week": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 31
+    },
+    "month": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 12
+    },
+    "duration": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 1424
+    },
+    "campaign": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 45
+    },
+    "pdays": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 498
+    },
+    "previous": {
+      "dtype": "int64",
+      "missing": 0,
+      "unique": 40
+    },
+    "poutcome": {
+      "dtype": "str",
+      "missing": 22234,
+      "unique": 3
+    },
+    "y": {
+      "dtype": "str",
+      "missing": 0,
+      "unique": 2
+    }
+  }
+}

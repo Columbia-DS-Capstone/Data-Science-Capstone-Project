@@ -1,0 +1,25 @@
+column,issue,treatment,reason
+LIMIT_BAL,No special issue,Retain; standard scale,Preserve source information
+SEX,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+EDUCATION,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+MARRIAGE,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+AGE,No special issue,Retain; standard scale,Preserve source information
+PAY_1,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+PAY_2,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+PAY_3,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+PAY_4,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+PAY_5,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+PAY_6,"Category codes, including undocumented values",Keep each code as a separate category; one-hot encode,"EDA flags EDUCATION 0/5/6, MARRIAGE 0, PAY -2/0; avoid invented semantics"
+BILL_AMT1,No special issue,Retain; standard scale,Preserve source information
+BILL_AMT2,No special issue,Retain; standard scale,Preserve source information
+BILL_AMT3,No special issue,Retain; standard scale,Preserve source information
+BILL_AMT4,No special issue,Retain; standard scale,Preserve source information
+BILL_AMT5,No special issue,Retain; standard scale,Preserve source information
+BILL_AMT6,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT1,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT2,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT3,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT4,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT5,No special issue,Retain; standard scale,Preserve source information
+PAY_AMT6,No special issue,Retain; standard scale,Preserve source information
+y,No special issue,Retain,Preserve source information
