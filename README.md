@@ -114,3 +114,25 @@ The output folder also contains a training profile, missingness masks, a reprodu
 Fraud preprocessing is deferred.
 
 See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and reuse of the saved preprocessing on synthetic data.
+
+## Baseline models
+
+Compare original and cleaned data with nine models. Use Python 3.12 and `uv sync --frozen` first:
+
+```bash
+uv run python -m agentic_gan.tools.baselines --dataset default --arm both
+uv run python -m agentic_gan.tools.baselines --dataset polish --arm both
+uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both
+```
+
+Omit `--arm both` to run only the cleaned arm. Each command uses the shared dataset configuration and raw inputs, with training-only preprocessing and three-fold training CV. Selection uses validation PR-AUC; the selected model receives test PR-AUC, ROC-AUC, F1, precision, recall, and accuracy. The compact `results/baselines.csv` contains validation PR-AUC, training CV PR-AUC mean/SD, and selected-model test metrics. Per-run JSON files retain full metrics, warnings, model settings, source/split hashes, and package versions. Seed defaults to 42 and CV folds to 3. Results accumulate in the CSV; matching dataset/arm/seed/CV runs are replaced on rerun. Run commands sharing this file sequentially.
+
+The Training Agent and synthetic-data experiments can reuse:
+
+```python
+from agentic_gan.tools.baselines import run_models
+
+results = run_models(X_train, y_train, X_val, y_val, X_test, y_test, seed=42)
+```
+
+Pass encoded features, or supply an unfitted `preprocessor=` for raw data. Synthetic rows belong only in the training inputs. See [baseline results and comparison notes](docs/notes/baselines.md) for measured results and comparison conventions.
