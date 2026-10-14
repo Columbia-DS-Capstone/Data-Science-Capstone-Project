@@ -64,3 +64,53 @@ Add team member names, faculty advisor, and industry mentor here.
 License / Usage
 
 This project was created for academic purposes. Usage of project code, data, or derived artifacts should comply with Columbia University requirements, applicable licenses, and any confidentiality or data-use agreements associated with the industry-sponsored capstone.
+
+## Shared preprocessing
+
+One script prepares Bank Marketing, Default, and Polish Bankruptcy data:
+`src/agentic_gan/tools/preprocessing.py`.
+
+### Configuration
+
+Edit [datasets.json](src/agentic_gan/utils/datasets.json) to set each dataset's input path, target column, categorical columns, imputation method, and split settings. Defaults are stratified **60% training / 20% validation / 20% test**, **seed 42**, and **median imputation**. Bank's post-call `duration` feature is excluded by default.
+
+Place the raw inputs at the configured paths (relative to the repo root):
+
+| Dataset | Default input |
+|---|---|
+| Bank Marketing | `data/raw/bank_marketing.csv` |
+| Default | `data/raw/default.csv` |
+| Polish Bankruptcy | `data/raw/polish_companies_bankruptcy_uci365.zip` |
+
+The script reads local inputs; it does not download them. See the [input format details](docs/preprocessing.md) before preparing the files.
+
+### Run
+
+After `uv sync`, run from the repo root:
+
+```bash
+uv run python -m agentic_gan.tools.preprocessing --dataset bank_marketing
+uv run python -m agentic_gan.tools.preprocessing --dataset default
+uv run python -m agentic_gan.tools.preprocessing --dataset polish
+```
+
+The script generates splits directly from the config. The same input rows in the same order, settings, and software versions reproduce the same splits. Imputation, category encoding, and scaling are learned **only from training rows**.
+
+Optional overrides include `--config /path/to/datasets.json`, `--input /path/to/source`, `--imputation mean`, and `--include-duration` for a post-call Bank diagnostic.
+
+### Outputs
+
+Results are written to `data/interim/<dataset>/`:
+
+| Files | Purpose |
+|---|---|
+| `train_cleaned.csv`, `validation_cleaned.csv`, `test_cleaned.csv` | Cleaned data before encoding/scaling; use the training table for GAN training |
+| `train_encoded.csv`, `validation_encoded.csv`, `test_encoded.csv` | Encoded and scaled data for predictive models |
+| `preprocessor.pkl` | Saved preprocessing settings fitted on training data, reusable on synthetic rows |
+| `treatment_log.csv` | Per-column issues, treatments, and reasons |
+
+The output folder also contains a training profile, missingness masks, a reproducibility manifest, and a category-code audit for Default. Rerunning replaces generated outputs. Exclude the `source_row` identifier from model features. Raw inputs and generated outputs are ignored by Git.
+
+Fraud preprocessing is deferred.
+
+See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and reuse of the saved preprocessing on synthetic data.

@@ -1,0 +1,76 @@
+{
+  "bank_marketing": {
+    "file": "data/raw/bank_marketing.csv",
+    "target": "y",
+    "discrete": [
+      "job",
+      "marital",
+      "education",
+      "default",
+      "housing",
+      "loan",
+      "contact",
+      "month",
+      "poutcome",
+      "previously_contacted"
+    ],
+    "audit_file": null,
+    "cohorts": [],
+    "split": {
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2,
+      "seed": 42
+    },
+    "imputation": "median",
+    "include_duration": false
+  },
+  "default": {
+    "file": "data/raw/default.csv",
+    "target": "y",
+    "discrete": [
+      "SEX",
+      "EDUCATION",
+      "MARRIAGE",
+      "PAY_1",
+      "PAY_2",
+      "PAY_3",
+      "PAY_4",
+      "PAY_5",
+      "PAY_6"
+    ],
+    "audit_file": "eda/output/default_code_audit.csv",
+    "cohorts": [],
+    "split": {
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2,
+      "seed": 42
+    },
+    "imputation": "median",
+    "include_duration": false
+  },
+  "polish": {
+    "file": "data/raw/polish_companies_bankruptcy_uci365.zip",
+    "target": "bankrupt",
+    "discrete": [
+      "cohort"
+    ],
+    "audit_file": null,
+    "cohorts": [
+      "1year.arff",
+      "2year.arff",
+      "3year.arff",
+      "4year.arff",
+      "5year.arff"
+    ],
+    "split": {
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2,
+      "seed": 42
+    },
+    "imputation": "median",
+    "include_duration": false
+  }
+}

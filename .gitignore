@@ -17,3 +17,6 @@ eda/framework_spike/benchmark_*.jsonl
 # Tool caches
 .pytest_cache/
 .ruff_cache/
+
+# Cached public inputs and generated preprocessing artifacts
+data/raw/
