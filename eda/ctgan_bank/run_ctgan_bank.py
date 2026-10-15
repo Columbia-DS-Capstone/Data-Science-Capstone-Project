@@ -1,9 +1,9 @@
-"""Train CTGAN on the UCI Bank Marketing training split and write synthetic subscriber rows.
+"""Train CTGAN on the cleaned UCI Bank Marketing training split and write synthetic subscribers.
 
-Input is Raghav's ``X_train`` (eda/baseline-modeling/uci_banking/scripts/uci_preprocessing.py).
-``pdays`` is NaN there for customers never contacted before; CTGAN cannot take NaN, so it is
-temporarily filled with the original -1 sentinel and restored to NaN after sampling.
-Switch the input to Noor's cleaned table (#29) when it is ready and drop the pdays handling.
+Input is cleaned table (data/interim/bank_marketing/train_cleaned.csv, built by
+agentic_gan.tools.preprocessing). It has no missing values: ``pdays`` keeps the -1 sentinel
+for customers never contacted before, and ``source_row`` (a row ID) is dropped here.
+The target and discrete columns come from the shared dataset settings.
 
 Run from the repo root:
     uv run python eda/ctgan_bank/run_ctgan_bank.py [--epochs 300]
@@ -12,25 +12,19 @@ Run from the repo root:
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
-import numpy as np
+import pandas as pd
+
+from agentic_gan.tools.ctgan import fill_counts, sample_synthetic, save_model, train_ctgan
+from agentic_gan.utils.datasets import DATASETS
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "eda" / "baseline-modeling" / "uci_banking" / "scripts"))
-
-from uci_preprocessing import load_and_preprocess_uci  # noqa: E402
-
-from agentic_gan.tools.ctgan import (  # noqa: E402
-    fill_counts,
-    sample_synthetic,
-    save_model,
-    train_ctgan,
-)
-
-SYNTHETIC_DIR = ROOT / "data" / "interim" / "bank_marketing" / "synthetic"
+CONFIG = DATASETS["bank_marketing"]
+TRAIN_FILE = ROOT / "data" / "interim" / CONFIG.name / "train_cleaned.csv"
+SYNTHETIC_DIR = ROOT / "data" / "interim" / CONFIG.name / "synthetic"
 ARTIFACT_DIR = ROOT / "eda" / "ctgan_bank" / "artifacts"
+ID_COLUMN = "source_row"
 PDAYS_SENTINEL = -1
 
 
@@ -54,32 +48,24 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
-    data = load_and_preprocess_uci(seed=args.seed)
-    train = data.X_train.copy()
-    train["y"] = data.y_train.values
+    train = pd.read_csv(TRAIN_FILE).drop(columns=ID_COLUMN)
 
-    # Temporary adapter: CTGAN cannot take NaN. previously_contacted keeps the information.
-    train_filled = train.fillna({"pdays": PDAYS_SENTINEL})
-
-    real_pass = float(consistent_rows(train_filled).mean())
+    real_pass = float(consistent_rows(train).mean())
     assert real_pass == 1.0, f"consistency rules fail on {1 - real_pass:.2%} of real rows"
 
     SYNTHETIC_DIR.mkdir(parents=True, exist_ok=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     model = train_ctgan(
-        train_filled, "y", epochs=args.epochs, device=args.device, seed=args.seed,
+        train, CONFIG.target, discrete_columns=list(CONFIG.discrete),
+        epochs=args.epochs, device=args.device, seed=args.seed,
         log_path=ARTIFACT_DIR / "ctgan_losses.csv",
     )
     save_model(model, ARTIFACT_DIR / "ctgan_bank.pkl")
 
-    counts = fill_counts(data.y_train)
-    largest = max(counts.values())
-    pool = sample_synthetic(model, largest, target_value=1, seed=args.seed,
-                            drop_duplicates_of=train_filled, row_filter=consistent_rows)
-
-    # Restore the NaN that was filled in for training: never-contacted customers.
-    pool.loc[pool["pdays"] == PDAYS_SENTINEL, "pdays"] = np.nan
+    counts = fill_counts(train[CONFIG.target])
+    pool = sample_synthetic(model, max(counts.values()), target_value=1, seed=args.seed,
+                            drop_duplicates_of=train, row_filter=consistent_rows)
 
     # Nested subsets: the 10% and 25% files are the first rows of the 50% file.
     written = {}
@@ -89,13 +75,15 @@ def main() -> None:
         written[str(fraction)] = {"rows": n, "file": str(path.relative_to(ROOT))}
 
     meta = {
+        "input_file": str(TRAIN_FILE.relative_to(ROOT)),
         "n_train_rows": model.n_train_rows,
-        "n_train_positives": int(data.y_train.sum()),
+        "n_train_positives": int(train[CONFIG.target].sum()),
         "params": model.params,
         "train_seconds": round(model.train_seconds, 1),
         "fills": written,
-        "pdays_nan_share_real": round(float(train["pdays"].isna().mean()), 4),
-        "pdays_nan_share_synthetic": round(float(pool["pdays"].isna().mean()), 4),
+        "never_contacted_share_real": round(float((train["pdays"] == PDAYS_SENTINEL).mean()), 4),
+        "never_contacted_share_synthetic": round(
+            float((pool["pdays"] == PDAYS_SENTINEL).mean()), 4),
     }
     (ARTIFACT_DIR / "run_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))

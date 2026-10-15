@@ -9,7 +9,6 @@ Run from the repo root:
 """
 
 import json
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -21,10 +20,7 @@ import pandas as pd  # noqa: E402
 from scipy.stats import ks_2samp  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "eda" / "baseline-modeling" / "uci_banking" / "scripts"))
-
-from uci_preprocessing import load_and_preprocess_uci  # noqa: E402
-
+TRAIN_FILE = ROOT / "data" / "interim" / "bank_marketing" / "train_cleaned.csv"
 SYNTHETIC_DIR = ROOT / "data" / "interim" / "bank_marketing" / "synthetic"
 ARTIFACT_DIR = ROOT / "eda" / "ctgan_bank" / "artifacts"
 
@@ -127,11 +123,13 @@ def plot_corr_diff(diff: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    data = load_and_preprocess_uci()
-    real_all = data.X_train.copy()
-    real_all["y"] = data.y_train.values
+    real_all = pd.read_csv(TRAIN_FILE).drop(columns="source_row")
     real = real_all[real_all["y"] == 1].reset_index(drop=True)
     synth = pd.read_csv(SYNTHETIC_DIR / "bank_ctgan_fill50.csv")
+    # pdays = -1 means never contacted; compare days since contact on contacted customers only.
+    real_cmp, synth_cmp = real.copy(), synth.copy()
+    real_cmp["pdays"] = real_cmp["pdays"].replace(-1, np.nan)
+    synth_cmp["pdays"] = synth_cmp["pdays"].replace(-1, np.nan)
     meta = json.loads((ARTIFACT_DIR / "run_meta.json").read_text())
     losses = pd.read_csv(ARTIFACT_DIR / "ctgan_losses.csv")
 
@@ -153,10 +151,10 @@ def main() -> None:
         f"last-50 mean {d.mean():.3f} (std {d.std():.3f})")
     say("Plot: loss_curves.png")
 
-    say("\n== Numeric columns: real subscribers vs synthetic ==")
+    say("\n== Numeric columns: real subscribers vs synthetic (pdays: contacted only) ==")
     rows = []
     for col in numeric:
-        r, s = real[col].dropna(), synth[col].dropna()
+        r, s = real_cmp[col].dropna(), synth_cmp[col].dropna()
         ks = ks_2samp(r, s).statistic if len(r) and len(s) else np.nan
         rows.append({
             "column": col, "real_mean": r.mean(), "synth_mean": s.mean(),
@@ -165,7 +163,7 @@ def main() -> None:
         })
     say(pd.DataFrame(rows).round(3).to_string(index=False))
     say("KS = largest gap between the two cumulative distributions (0 = identical, 1 = disjoint).")
-    plot_numeric(real, synth, numeric)
+    plot_numeric(real_cmp, synth_cmp, numeric)
 
     say("\n== Categorical columns: total variation distance ==")
     tvd = {}
@@ -180,33 +178,31 @@ def main() -> None:
     plot_categorical(real, synth, categorical)
 
     say("\n== Correlation (numeric columns, pairwise, NaN skipped) ==")
-    diff = synth[numeric].corr() - real[numeric].corr()
+    diff = synth_cmp[numeric].corr() - real_cmp[numeric].corr()
     upper = diff.where(np.triu(np.ones(diff.shape, dtype=bool), k=1)).stack()
     worst = upper.abs().idxmax()
     say(f"Mean absolute difference: {upper.abs().mean():.3f}")
     say(f"Largest difference: {worst[0]} vs {worst[1]} = {upper[worst]:+.3f}")
     plot_corr_diff(diff)
 
-    say("\n== pdays missing share (never contacted) ==")
-    say(f"Real, all rows:        {real_all['pdays'].isna().mean():.4f}")
-    say(f"Real, subscribers:     {real['pdays'].isna().mean():.4f}")
-    say(f"Synthetic:             {synth['pdays'].isna().mean():.4f}")
+    say("\n== Never-contacted share (pdays == -1) ==")
+    say(f"Real, all rows:        {(real_all['pdays'] == -1).mean():.4f}")
+    say(f"Real, subscribers:     {(real['pdays'] == -1).mean():.4f}")
+    say(f"Synthetic:             {(synth['pdays'] == -1).mean():.4f}")
 
     say("\n== Value and consistency checks (synthetic) ==")
-    days = synth["pdays"].dropna()
+    days = synth_cmp["pdays"].dropna()
     say(f"pdays non-integer: {int((days != days.round()).sum())}, "
-        f"below 1: {int((days < 1).sum())} (of {len(days)} non-missing)")
+        f"below 1 (excluding -1): {int((days < 1).sum())} (of {len(days)} contacted)")
     contacted = synth["previously_contacted"] == 1
     bad_prev = ((synth["previous"] > 0) != contacted).sum()
-    bad_days = (synth["pdays"].isna() == contacted).sum()
+    bad_days = ((synth["pdays"] == -1) == contacted).sum()
     say(f"previous vs previously_contacted disagree: {int(bad_prev)} rows")
-    say(f"pdays missing vs previously_contacted disagree: {int(bad_days)} rows")
+    say(f"pdays == -1 vs previously_contacted disagree: {int(bad_days)} rows")
 
     say("\n== Repeated rows ==")
     key_cols = features + ["y"]
-    fill = {"pdays": -1}
-    s_keys = synth[key_cols].fillna(fill)
-    r_keys = real_all[key_cols].fillna(fill)
+    s_keys, r_keys = synth[key_cols], real_all[key_cols]
     say(f"Duplicate rows within synthetic: {int(s_keys.duplicated().sum())}")
     say(f"Duplicate rows within real training data: {int(r_keys.duplicated().sum())}")
     copied = s_keys.merge(r_keys.drop_duplicates(), on=key_cols, how="inner")
