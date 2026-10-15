@@ -1,4 +1,5 @@
 {
+  "input_file": "data/interim/bank_marketing/train_cleaned.csv",
   "n_train_rows": 27126,
   "n_train_positives": 3173,
   "params": {
@@ -17,7 +18,7 @@
     "device": "cpu",
     "seed": 42
   },
-  "train_seconds": 465.9,
+  "train_seconds": 519.3,
   "fills": {
     "0.1": {
       "rows": 2078,
@@ -32,6 +33,6 @@
       "file": "data/interim/bank_marketing/synthetic/bank_ctgan_fill50.csv"
     }
   },
-  "pdays_nan_share_real": 0.8195,
-  "pdays_nan_share_synthetic": 0.6913
+  "never_contacted_share_real": 0.8195,
+  "never_contacted_share_synthetic": 0.6018
 }
