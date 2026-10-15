@@ -102,14 +102,13 @@ Optional overrides include `--config /path/to/datasets.json`, `--input /path/to/
 
 Results are written to `data/interim/<dataset>/`:
 
-| Files | Purpose |
-|---|---|
-| `train_cleaned.csv`, `validation_cleaned.csv`, `test_cleaned.csv` | Cleaned data before encoding/scaling; use the training table for GAN training |
-| `train_encoded.csv`, `validation_encoded.csv`, `test_encoded.csv` | Encoded and scaled data for predictive models |
-| `preprocessor.pkl` | Saved preprocessing settings fitted on training data, reusable on synthetic rows |
-| `treatment_log.csv` | Per-column issues, treatments, and reasons |
+Each dataset folder contains only:
 
-The output folder also contains a training profile, missingness masks, a reproducibility manifest, and a category-code audit for Default. Rerunning replaces generated outputs. Exclude the `source_row` identifier from model features. Raw inputs and generated outputs are ignored by Git.
+- `train_cleaned.csv`
+- `validation_cleaned.csv`
+- `test_cleaned.csv`
+
+These tables contain corrected and imputed features before encoding/scaling. `source_row` identifies source rows and must be excluded from model/GAN features. The baseline runner fits encoding and scaling in memory using training rows only. Rerunning preprocessing replaces the cleaned files and removes legacy generated artifacts. Raw inputs and generated outputs are ignored by Git.
 
 Fraud preprocessing is deferred.
 
