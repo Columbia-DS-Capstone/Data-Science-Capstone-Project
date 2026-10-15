@@ -56,6 +56,7 @@ def load_and_preprocess_uci_smotenc(
     train_size: float = 0.6,
     val_size: float = 0.2,
     test_size: float = 0.2,
+    include_duration: bool = False,
 ) -> UCISMOTENCData:
     """Generate exactly ``n_synthetic`` training rows with categorical-aware SMOTENC.
 
@@ -66,7 +67,8 @@ def load_and_preprocess_uci_smotenc(
         raise ValueError("n_synthetic must be a positive integer")
 
     base = load_and_preprocess_uci(
-        seed=seed, train_size=train_size, val_size=val_size, test_size=test_size
+        seed=seed, train_size=train_size, val_size=val_size, test_size=test_size,
+        include_duration=include_duration,
     )
     counts = base.y_train.value_counts()
     minority_count = int(counts.loc[1])

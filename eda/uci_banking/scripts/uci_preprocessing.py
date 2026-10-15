@@ -1,4 +1,4 @@
-"""Prepare the UCI Bank Marketing data for a pre-call baseline model."""
+"""Prepare UCI Bank Marketing data for pre-call or post-call experiments."""
 
 from typing import NamedTuple
 import math
@@ -32,13 +32,15 @@ def load_and_preprocess_uci(
     train_size: float = 0.6,
     val_size: float = 0.2,
     test_size: float = 0.2,
+    include_duration: bool = False,
 ) -> UCIPreprocessedData:
     """Fetch UCI dataset 222, split it, and fit preprocessing on training rows.
 
     Split sizes are fractions of the full dataset and must be positive and sum to 1.
     Source unknown categories remain "unknown". The pdays=-1 sentinel becomes
     missing and is filled with the training median after splitting. The fitted
-    preprocessor is then applied to validation and test rows.
+    preprocessor is then applied to validation and test rows. Full call duration
+    is excluded by default; include it only for a post-call diagnostic.
     """
     sizes = (train_size, val_size, test_size)
     if not all(math.isfinite(size) and 0 < size < 1 for size in sizes) or not math.isclose(
@@ -59,8 +61,9 @@ def load_and_preprocess_uci(
     X[unknown_columns] = X[unknown_columns].fillna("unknown")
     assert not X.isna().any().any(), "Review unexpected missing values before modeling"
 
-    # Duration is known only after a call and would leak the outcome for pre-call prediction.
-    X = X.drop(columns="duration")
+    # Full duration is available only after a call; use it only for post-call analysis.
+    if not include_duration:
+        X = X.drop(columns="duration")
     X["previously_contacted"] = (X["pdays"] != -1).astype(int)
     X["pdays"] = X["pdays"].replace(-1, np.nan)
     y = y.map({"no": 0, "yes": 1}).astype(int)
