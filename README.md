@@ -112,7 +112,7 @@ These tables contain corrected and imputed features before encoding/scaling. `so
 
 Fraud preprocessing is deferred.
 
-See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and reuse of the saved preprocessing on synthetic data.
+See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and preprocessing tool reuse.
 
 ## Baseline models
 
@@ -124,7 +124,7 @@ uv run python -m agentic_gan.tools.baselines --dataset polish --arm both
 uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both
 ```
 
-Omit `--arm both` to run only the cleaned arm. Each command uses the shared dataset configuration and raw inputs, with training-only preprocessing and three-fold training CV. Selection uses validation PR-AUC; the selected model receives test PR-AUC, ROC-AUC, F1, precision, recall, and accuracy. The compact `results/baselines.csv` contains validation PR-AUC, training CV PR-AUC mean/SD, and selected-model test metrics. Per-run JSON files retain full metrics, warnings, model settings, source/split hashes, and package versions. Seed defaults to 42 and CV folds to 3. Results accumulate in the CSV; matching dataset/arm/seed/CV runs are replaced on rerun. Run commands sharing this file sequentially.
+Omit `--arm both` to run only the cleaned arm. Both arms read raw inputs. The original arm uses minimum preparation; the cleaned arm applies shared cleaning rules. Imputation, encoding, and scaling are fitted within each training CV fold. Stacking base models also fit preprocessing within their inner folds. Final fitting uses training rows only; validation and test only receive the fitted transformations. Selection uses validation PR-AUC; the selected model receives test PR-AUC, ROC-AUC, F1, precision, recall, and accuracy. The compact `results/baselines.csv` contains validation PR-AUC, training CV PR-AUC mean/SD, and selected-model test metrics. Per-run JSON files retain full metrics, warnings, model settings, source/split hashes, and package versions. Seed defaults to 42 and CV folds to 3. Results accumulate in the CSV; matching dataset/arm/seed/CV runs are replaced on rerun. Run commands sharing this file sequentially.
 
 The Training Agent and synthetic-data experiments can reuse:
 
