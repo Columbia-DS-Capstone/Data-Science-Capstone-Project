@@ -16,7 +16,7 @@ Splits are stratified 60/20/20 with seed 42. Keep input rows/order, configuratio
 - **Default:** drop ID, standardize target and repayment column names, and preserve undocumented codes as separate categories. The current data has no missing values.
 - **Polish:** combine all five ARFF cohorts in configured order, retain the cohort label, replace infinite values with missing values, and impute financial ratios. Finite extreme values remain unchanged.
 
-The baseline runner fits encoding and scaling in memory using training rows only, refitting within each outer CV training fold. It does not require encoded CSVs or saved preprocessing files. Future synthetic-data training should reuse its real-training-fitted transformations without refitting on synthetic rows.
+Both baseline arms read raw data and fit imputation, encoding, and scaling in memory within each CV training fold, including stacking inner folds. Final fitting learns preprocessing from training rows only. The three cleaned CSVs are for GAN use; baselines do not read them. Future synthetic-data training should reuse its real-training-fitted transformations without refitting on synthetic rows.
 
 Overrides: `--config /path/to/datasets.json`, `--input /path/to/source`, `--imputation mean`, and `--include-duration`. Input paths in configuration are relative to the repository root; `--root` overrides that root.
 

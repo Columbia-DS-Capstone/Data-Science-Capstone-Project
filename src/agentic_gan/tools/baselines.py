@@ -148,8 +148,33 @@ def _check_inputs(X_train, y_train, X_val, y_val, X_test, y_test, preprocessor, 
         raise ValueError("Too few training examples per class for stacking/CV")
 
 
+def _with_preprocessing(estimator, preprocessor):
+    """Fit preprocessing only on the rows used by each estimator or stacking fold."""
+    estimator = clone(estimator)
+    if preprocessor is None:
+        return estimator
+    if isinstance(estimator, StackingClassifier):
+        estimator.set_params(
+            estimators=[
+                (name, make_pipeline(clone(preprocessor), clone(base)))
+                for name, base in estimator.estimators
+            ]
+        )
+        return estimator
+    return make_pipeline(clone(preprocessor), estimator)
+
+
 def run_models(
-    X_train, y_train, X_val, y_val, X_test, y_test, seed=42, *, preprocessor=None, cv_folds=3
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    X_test,
+    y_test,
+    seed=42,
+    *,
+    preprocessor=None,
+    cv_folds=3,
 ) -> pd.DataFrame:
     """Return one row per model; select on validation PR-AUC, test only the winner.
 
@@ -159,7 +184,7 @@ def run_models(
     schema, preprocessing, CV settings and real holdouts for every arm.
     With already-encoded inputs, CV describes training-fitted preprocessing;
     pass raw data + preprocessor for outer-fold-local preprocessing.
-    Stacking shares that preprocessing across its inner folds, as in the notebook.
+    Stacking base models each own their preprocessing, including inside inner folds.
     Test metric cells are empty for models not selected. Failures and convergence
     warnings are recorded; failed models cannot win. No estimator is fitted on test.
     """
@@ -187,11 +212,7 @@ def run_models(
                 "error": "",
                 **{f"test_{m}": np.nan for m in METRICS},
             }
-            model = (
-                make_pipeline(clone(preprocessor), estimator)
-                if preprocessor is not None
-                else estimator
-            )
+            model = _with_preprocessing(estimator, preprocessor)
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 try:
@@ -289,35 +310,35 @@ def _minimal_transformer(X, discrete, strategy="median"):
 
 
 def prepare_inputs(dataset, arm, root, seed, config_path=None):
-    """Load raw sources and return folds plus unfitted train-only preprocessing."""
+    """Split raw data and return an unfitted preprocessing pipeline for the chosen arm."""
     if arm not in ("original", "cleaned"):
         raise ValueError(f"Unknown arm: {arm}; choose original or cleaned")
     config = load_configs(config_path)[dataset]
     config = replace(config, split={**config.split, "seed": seed})
     raw = load_dataset(config, root / config.file)
-    normalized = normalize(raw, config, config.include_duration)
     data = raw.copy()
-    data[config.target] = normalized[config.target]
+    data[config.target] = normalize(raw, config, config.include_duration)[config.target]
     if arm == "cleaned":
         transformer = SharedPreprocessor(config)
-    elif arm == "original":
-        # Minimum required to fit all estimators. No derived contact flag or recoding.
+    else:
         if dataset == "bank_marketing" and not config.include_duration:
             data = data.drop(columns="duration")
         transformer = _minimal_transformer(
             data.drop(columns=config.target), config.discrete, config.imputation
         )
-    else:
-        raise ValueError(f"Unknown arm: {arm}")
     ids = split_dataset(data, config)
-    frames = [data.loc[ids[s]] for s in ("train", "validation", "test")]
+    frames = [data.loc[ids[name]] for name in ("train", "validation", "test")]
+    source_hash = hashlib.sha256((root / config.file).read_bytes()).hexdigest()
     inputs = tuple(
         item
         for frame in frames
         for item in (frame.drop(columns=config.target), frame[config.target])
     )
     metadata = {
-        "source_sha256": hashlib.sha256((root / config.file).read_bytes()).hexdigest(),
+        "source_sha256": source_hash,
+        "input_hashes": {"raw": source_hash},
+        "input_kind": "raw",
+        "split_origin": "config and seed",
         "config": asdict(config),
         "include_duration": config.include_duration,
         "split_hashes": {
@@ -350,6 +371,11 @@ def save_results(table, path):
 def run_dataset(dataset, *, root=None, arm="cleaned", seed=42, cv_folds=3, config_path=None):
     root = Path(root) if root else Path(__file__).resolve().parents[3]
     inputs, transformer, metadata = prepare_inputs(dataset, arm, root, seed, config_path)
+    metadata["preprocessing"] = (
+        "Raw inputs; imputation, encoding and scaling fitted inside each outer CV fold; "
+        "stacking base pipelines also refit preprocessing inside inner folds. "
+        "Final fitting uses training rows only; validation/test are transform-only."
+    )
     table = run_models(*inputs, seed=seed, preprocessor=transformer, cv_folds=cv_folds)
     for key, value in [
         ("dataset", dataset),
