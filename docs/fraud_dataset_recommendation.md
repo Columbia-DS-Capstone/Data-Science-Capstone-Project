@@ -89,6 +89,8 @@ I propose 0.01, 0.02, 0.05 and 0.10 for this dataset. Larger levels cost more co
 
 The issue asked for real, non-simulated datasets that could add fraud rows. The sources I could read do not name any public real dataset that uses the ULB features. The V1 to V28 columns are principal components of confidential variables, so components from any other dataset mean something different and rows cannot be pooled. A candidate can therefore only be a second dataset, not an addition to this one.
 
+Checked on 16 October (`eda/fraud/compare_schemas.py`). ULB has 31 columns (`Time`, `V1` to `V28`, `Amount`, `Class`). IEEE-CIS has 394 transaction columns and 40 identity columns, and only an amount and a time line up. IEEE-CIS also has columns named `V1` to `V339`, but they are Vesta-engineered features, not principal components: its `V1` takes two values (0 and 1) and is 47% missing, and 263 of its 339 V columns are integer-valued, while ULB's `V1` is a continuous score with 275,663 distinct values. A ULB model that uses only the amount and the time scores 0.012 validation PR-AUC (one untuned fit, three seeds) against 0.515 with all columns, where chance is 0.0017. Almost all of its signal is in columns that IEEE-CIS does not have.
+
 | Candidate | Real? | Size and fraud | Features | Licence and access | Verdict |
 |---|---|---|---|---|---|
 | ULB / Worldline (current) | Real, 2 days in Sept 2013 | 284,807 rows, 492 fraud (0.17%) | `Time`, `Amount`, V1 to V28 (PCA) | Database Contents License v1.0 per the benchmark below and a 2024 paper. A Kaggle metadata copy lists ODbL, so check the Kaggle page | Keep, with the adjustments above |
