@@ -147,6 +147,19 @@ Our reading of what the rules do not say, to confirm with the mentors or TD:
 
 **Recommendation.** Ask the mentors on 16 October. Do not download further, build the subsample or change the config before they answer.
 
+### If we kept ULB on its own
+
+The mentors suggested adding fraud rows to this dataset. That is not possible (the features are PCA components, and all 473 fraud rows after deduplication are under 500), so the question is what it would take to make ULB alone give a usable answer. It would take:
+
+1. **Deduplicate first, then split.** Fraud 284 / 94 / 95, no leak (section 1).
+2. **Small fill levels only:** 0.01, 0.02, 0.05 and 0.10, which add 1,697 to 16,967 rows (6 to 60 times the real fraud rows). Level 1.0 would add 597 times.
+3. **Pool train and validation** (378 fraud rows) and use repeated stratified cross-validation, so recall is judged on 378 fraud rows (about 4 points at recall 0.8) instead of 94 (about 8). Keep the test part (95 fraud rows) for the end. This needs a cross-validation option in the orchestrator's split step.
+4. **Judge gains with paired bootstrap intervals** over the five seeds, and accept "no reliable gain" as a result.
+5. **Train the generator on the fraud rows only**, with a small network, early stopping and the distance-to-closest-record check, because 284 rows are easy to memorise.
+6. **Report a time split** as a sensitivity check (section 2).
+
+Even then, a result of no reliable gain is the likely outcome, and it is a valid result for the stress case. The measurement noise is why a second dataset helps: with 4,133 fraud rows in the IEEE-CIS validation part, recall is known to about 1 point, and about 3 in the 100k subsample.
+
 ## 5. What this changes in the pipeline
 
 These need team agreement before anyone builds them:
