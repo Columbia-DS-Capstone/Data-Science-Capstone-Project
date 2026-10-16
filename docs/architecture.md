@@ -558,7 +558,7 @@ Status as of 15 October 2026. "Sprint 1 tasks" are the issues of the sprint that
 | Architecture map | #4 | Team | #23 this document (Haasita) | `docs/` |
 | Orchestrator | #5 | Haasita, Raghav | #27 objects, state, manifest, split (Haasita). #28 graph, stubs, decision log (Raghav). #25 framework (Raghav) | `schemas.py`, `orchestrator/` |
 | Pre-processing | #6 | Akriti, Arshnoor, Haasita | #29 shared script (Arshnoor) | `tools/preprocessing.py`, `utils/datasets.json` |
-| Model Selection | #7 | Akriti, Kyle | #32 CTGAN code and a Bank run (Kyle). #33 generator rule (Akriti). #34 GAN survey (Akriti) | CTGAN tool in review (#32) |
+| Model Selection | #7 | Akriti, Kyle | #32 CTGAN code and a Bank run (Kyle). #33 generator rule (Akriti). #34 GAN survey (Akriti) | CTGAN tool and a Bank run merged (#32, PR #44) |
 | Quality Evaluation | #8 | Haasita, Raghav | None yet | None yet |
 | Model Training | #9 | Arshnoor, Kyle | #30 and #31 baselines (Arshnoor). #26 SMOTE (Raghav). #35 augmented comparison (Kyle). #36 volume rule (if time permits) | `tools/baselines.py`, `agents/training.py` |
 | Evaluation and report | #10 | Arshnoor, Kyle | None yet | None yet |
@@ -598,7 +598,7 @@ What this means for the code:
 
 ## 13. Next steps
 
-Done: the agent specifications (this document), the schemas module, run state, manifest and split step (#27), and the framework choice (#25). The shared preprocessing script and the baselines for three datasets are in (#29, #30, #31).
+Done: the agent specifications (this document), the schemas module, run state, manifest and split step (#27), and the framework choice (#25). The shared preprocessing script and the baselines for three datasets are in (#29, #30, #31), and so is the CTGAN tool with a Bank run (#32).
 
 Next:
 
