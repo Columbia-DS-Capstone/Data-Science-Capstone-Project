@@ -169,4 +169,4 @@ These need team agreement before anyone builds them:
 - [Bank Account Fraud (Feedzai)](https://github.com/feedzai/bank-account-fraud) and the [NeurIPS 2022 paper](https://arxiv.org/abs/2211.13358)
 - [ULB credit card fraud dataset on Kaggle](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
 
-Dataset pages and the IEEE-CIS rules were read in a browser on 16 October. Counts for IEEE-CIS (from the Fraud Dataset Benchmark), the vehicle insurance claims set (from a paper) and Fraud ecommerce (from papers) come from secondary sources, and the Kaggle pages do not state whether the vehicle insurance and Fraud ecommerce data are real. Nothing was downloaded.
+Dataset pages and the IEEE-CIS rules were read in a browser on 16 October. The counts and signal checks come from the files downloaded that day (section 4, "Measured on the downloaded files"). The Kaggle pages do not say whether the vehicle insurance and Fraud ecommerce data are real. Nothing downloaded is in the repository.
