@@ -1,0 +1,52 @@
+Real training rows: 27126 (subscribers: 3173)
+Synthetic rows (largest file): 10390
+Training time: 519.3s for 300 epochs
+
+== Training losses ==
+Generator loss: first epoch 0.092, last-50 mean -1.851 (std 0.299)
+Discriminator loss: first epoch 0.171, last-50 mean 0.018 (std 0.203)
+Plot: loss_curves.png
+
+== Numeric columns: real subscribers vs synthetic (pdays: contacted only) ==
+              column  real_mean  synth_mean  real_std  synth_std  real_median  synth_median    KS
+                 age     41.311      42.557    13.409     12.965         38.0          40.0 0.078
+             balance   1824.252    1525.132  3658.940   2363.259        751.0         715.0 0.093
+        day_of_month     15.126      18.581     8.518      8.161         15.0          18.0 0.230
+            campaign      2.162       2.229     1.954      2.478          2.0           1.0 0.099
+               pdays    192.177     208.811   123.466     84.162        180.0         191.0 0.285
+            previous      1.146       1.090     2.655      2.060          0.0           0.0 0.054
+previously_contacted      0.344       0.398     0.475      0.490          0.0           0.0 0.054
+KS = largest gap between the two cumulative distributions (0 = identical, 1 = disjoint).
+
+== Categorical columns: total variation distance ==
+job          0.274
+marital      0.132
+education    0.089
+default      0.014
+housing      0.113
+loan         0.009
+contact      0.041
+month        0.174
+poutcome     0.117
+y            0.000
+TVD = half the summed gap in category shares (0 = identical, 1 = no overlap).
+
+== Correlation (numeric columns, pairwise, NaN skipped) ==
+Mean absolute difference: 0.051
+Largest difference: day_of_month vs previously_contacted = -0.118
+
+== Never-contacted share (pdays == -1) ==
+Real, all rows:        0.8195
+Real, subscribers:     0.6555
+Synthetic:             0.6018
+
+== Value and consistency checks (synthetic) ==
+pdays non-integer: 0, below 1 (excluding -1): 0 (of 4137 contacted)
+previous vs previously_contacted disagree: 0 rows
+pdays == -1 vs previously_contacted disagree: 0 rows
+
+== Repeated rows ==
+Duplicate rows within synthetic: 0
+Duplicate rows within real training data: 4
+Synthetic rows identical to a real row: 0
+(run_ctgan_bank.py already drops exact copies of real rows and repeats, so 0 here is by construction; near-duplicates are not checked.)

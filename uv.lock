@@ -17,6 +17,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "catboost" },
+    { name = "ctgan" },
     { name = "imbalanced-learn" },
     { name = "lightgbm" },
     { name = "matplotlib" },
@@ -52,6 +53,7 @@ notebooks = [
 [package.metadata]
 requires-dist = [
     { name = "catboost", specifier = ">=1.2.10" },
+    { name = "ctgan", specifier = ">=0.12.1" },
     { name = "imbalanced-learn", specifier = ">=0.14.2" },
     { name = "lightgbm", specifier = ">=4.7.0" },
     { name = "matplotlib", specifier = ">=3.11.2" },
