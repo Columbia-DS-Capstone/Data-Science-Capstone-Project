@@ -90,13 +90,34 @@ The issue asked for real, non-simulated datasets that could add fraud rows. The 
 | Candidate | Real? | Size and fraud | Features | Licence and access | Verdict |
 |---|---|---|---|---|---|
 | ULB / Worldline (current) | Real, 2 days in Sept 2013 | 284,807 rows, 492 fraud (0.17%) | `Time`, `Amount`, V1 to V28 (PCA) | Database Contents License v1.0 per the benchmark below and a 2024 paper. A Kaggle metadata copy lists ODbL, so check the Kaggle page | Keep, with the adjustments above |
-| IEEE-CIS (Vesta) | Real, donated by Vesta | 590,540 transactions, 20,663 fraud (3.5%) | About 390 to 430 masked columns in a transaction and an identity table, many missing values | Kaggle competition rules, read on 16 October: the data may be used for non-commercial purposes, including academic research and education (section 7A), and may not be redistributed (7B). Each user must accept the rules to download. The IEEE DataPort copy needs a subscription | Best real candidate for a second dataset, not a merge |
-| Vehicle insurance claims (Kaggle, shivamb) | Source listed as "Oracle Databases", collected by web download. Whether it is real or sample data is not documented | About 15,420 rows and 923 fraud (6%), from a paper that used the file. The Kaggle page does not show the counts | 32 mixed numeric and categorical columns, `FraudFound_P` target, `fraud_oracle.csv` 3.6 MB | CC0 (public domain), per the Kaggle page | Second candidate. About 554 training fraud rows, in the mentors' range. A different fraud type. Label its real or sample status as unverified |
+| IEEE-CIS (Vesta) | Real, donated by Vesta | 590,540 transactions, 20,663 fraud (3.50%), measured on `train_transaction.csv`. 24.4% have an identity record | About 390 to 430 masked columns in a transaction and an identity table, many missing values | Kaggle competition rules, read on 16 October: the data may be used for non-commercial purposes, including academic research and education (section 7A), and may not be redistributed (7B). Each user must accept the rules to download. The IEEE DataPort copy needs a subscription | Best real candidate for a second dataset, not a merge |
+| Vehicle insurance claims (Kaggle, shivamb) | Source listed as "Oracle Databases", collected by web download. Whether it is real or sample data is not documented | 15,420 rows and 923 fraud (5.99%), measured on the downloaded file. 554 / 185 / 184 fraud in a stratified 60/20/20 split | 32 mixed numeric and categorical columns, `FraudFound_P` target, `fraud_oracle.csv` 3.6 MB | CC0 (public domain), per the Kaggle page | Second candidate. 554 training fraud rows, in the mentors' range. A different fraud type. Clean (no duplicates, no missing values apart from placeholders). Boosting scores 0.28 validation PR-AUC against 0.06 chance. Label its real or sample status as unverified |
 | Elliptic (Bitcoin transactions) | Real, from the Bitcoin blockchain | 203,769 nodes, of which 4,545 illicit and 42,019 licit are labelled | 166 anonymised numeric features, 49 time steps, a transaction graph | CC BY-NC-ND 4.0 per the Kaggle page. NoDerivatives means synthetic data made from it could not be shared | Not recommended: cryptocurrency, anonymised features, and the licence conflicts with sharing synthetic data |
 | Feedzai Bank Account Fraud (NeurIPS 2022) | Synthetic. The Kaggle page says it was built from a real dataset with differential-privacy noise, feature encoding and a CTGAN generator | 1 million rows per variant, 30 features, about 11,000 fraud rows (1.1%) in the base file | Tabular, with built-in bias variants | CC BY-NC-SA 4.0 per the Kaggle page | Exclude: synthetic, and made with CTGAN, so a GAN on it would be circular |
-| Fraud ecommerce (Kaggle, vbinh002) | The Kaggle page has no description. Real or synthetic is not documented | About 151,000 rows and 14,000 fraud (9.4%), from papers. `Fraud_Data.csv` is 16 MB with 10 columns plus a label | User id, device id, browser, IP address, purchase value, sign-up and purchase times, 2015 | Licence listed as "Unknown" | Exclude until provenance and licence are known |
+| Fraud ecommerce (Kaggle, vbinh002) | The Kaggle page has no description. Real or synthetic is not documented | 151,112 rows and 14,151 fraud (9.36%), measured. `Fraud_Data.csv` is 16 MB with 10 columns plus a label | User id, device id, browser, IP address, purchase value, sign-up and purchase times, 2015 | Licence listed as "Unknown" | Exclude. Every one of the 7,600 purchases made within 60 seconds of sign-up is fraud (54% of its fraud), which looks like a rule or simulation, and provenance and licence are unknown |
 | Credit Card Fraud Detection Dataset 2023 (Kaggle) | Described as European cardholders in 2023. No further provenance | Over 550,000 rows (325 MB). The class balance is not on the page | `id`, V1 to V28 (anonymised again), Amount, Class | "Other (specified in description)", but the description gives no licence | Exclude: no provenance or licence, and anonymised features that cannot be pooled with ULB |
 | Sparkov simulated (Kaggle) | Simulated | 1.3 million rows, 5.7% fraud | Synthetic | CC0 1.0 | Exclude: simulated |
+
+### Measured on the downloaded files
+
+Run on 16 October with `eda/fraud/candidates/analyze_candidates.py` and `ieee_reduced_features.py` (the data is not in the repo). Stratified 60/20/20 split, seed 42, the same recipe as the orchestrator. "Signal" is one untuned gradient-boosting fit scored on the validation part, so read it as a rough guide only.
+
+| | IEEE-CIS | Vehicle insurance claims | Fraud ecommerce |
+|---|---|---|---|
+| Rows, fraud (rate) | 590,540, 20,663 (3.50%) | 15,420, 923 (5.99%) | 151,112, 14,151 (9.36%) |
+| Fraud in train / val / test | 12,398 / 4,133 / 4,132 | 554 / 185 / 184 | 8,491 / 2,830 / 2,830 |
+| Missing values | 41.1% of cells. 374 of 394 columns have gaps and 174 are over 50% empty | None. Placeholders instead: 320 rows with `Age = 0` (all in the "16 to 17" bin), the string `none` in four columns | None |
+| Exact duplicates | 3 | 0 | 0 |
+| Val and test rows with a copy in train | not checked beyond the 3 duplicates | 0 and 0 | 0 duplicates |
+| Fraud rate by time split (train / val / test) | 3.38% / 3.90% / 3.44% | not applicable (three policy years, 1994 to 1996) | 12.5% / 4.6% / 4.6% |
+| Signal, validation PR-AUC (chance) | 0.58 on a 100k subsample (0.035). 0.53 on the 109 columns with at most 5% missing, 0.57 on the 179 with at most 20% | 0.28 (0.06). Logistic regression 0.17 | 0.33 (0.09) on the basic columns, 0.62 with time-to-purchase and hour, 0.72 with device sharing |
+| Fill level 1.0 (times real positives) | 329,528 rows (26.6). In a 100k subsample, 55,802 (26.6) | 8,144 rows (14.7) | 73,685 rows (8.7) |
+
+Things worth knowing:
+
+- **IEEE-CIS.** The fraud rate is steady over its 182 days, so a time split is a fair primary split here, unlike ULB. Only 24.4% of rows have an identity record, and those are far likelier to be fraud (7.85% against 2.09%). A 100k subsample keeps 3.5% fraud and gives 2,099 training fraud rows.
+- **Vehicle insurance claims.** `PolicyNumber` is just the row number (1 to 15,420). The fraud rate varies a lot by policy type (13.8% for Sport - Collision, 0.7% for Sedan - Liability). Nothing in the file shows whether it is real or a sample dataset.
+- **Fraud ecommerce.** The 7,600 purchases within a minute of sign-up are all fraud, and devices shared by several users are 52.5% fraud. A GAN test on it would mostly learn those rules.
 
 ### If we add IEEE-CIS
 
