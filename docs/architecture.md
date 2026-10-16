@@ -43,7 +43,7 @@ The four datasets in scope. Numbers come from the EDA and the 9 October slides, 
 | Credit Card Fraud (ULB) | 284,807 | 492 (0.17%) | 295 (284 after dropping duplicates) | 170,294 (169,667 after) | none | 1,081 |
 
 - All four use a stratified 60/20/20 split with seed 42. For Credit Card Fraud the recommendation is to drop exact duplicate rows first (`docs/fraud_dataset_recommendation.md`).
-- Bank Marketing is the primary dataset. Default of Credit Card is the cleanest place to test generated data, since it has no missing values. Polish Bankruptcy tests the data-repair step. Credit Card Fraud has too few positives to expect a gain and is the stress case.
+- Bank Marketing is the primary dataset. Default of Credit Card is the cleanest place to test generated data, since it has no missing values. Polish Bankruptcy tests the data-repair step. Credit Card Fraud has too few positives to expect a gain and is the stress case. A second fraud dataset, IEEE-CIS, is proposed (question 10 in section 12) and not yet in scope.
 - Polish Bankruptcy pools five forecasting-horizon cohorts and has no company identifier. Its missingness is informative: column A27 is missing in 34.5% of bankrupt training rows and 4.9% of the others.
 - Default of Credit Card stores six monthly payment columns per client, which makes it the TimeGAN candidate (section 12, question 4).
 
@@ -591,7 +591,7 @@ What this means for the code:
 | 7 | Does the Model Selection Agent also own GAN training, or should GAN training be a separate agent? | Working assumption: Model Selection owns it (section 5.2) |
 | 8 | Is the $100 per person in Google Cloud credit enough for CTGAN across seeds and fill levels? | Open. The reduced Fraud grid and a per-dataset grid cut the cost |
 | 9 | Credit Card Fraud has 284 training positives after dropping duplicates. Is it acceptable as the stress case, with a no-gain result reported as a result? | New. See `docs/fraud_dataset_recommendation.md` |
-| 10 | Do the mentors want a second fraud dataset, for example IEEE-CIS (about 20,000 fraud rows), given the compute and the Kaggle terms? | New |
+| 10 | Do the mentors agree to IEEE-CIS (20,663 fraud rows, real) as the second fraud dataset? Its Kaggle terms allow non-commercial use including academic research and education, and forbid redistribution. Does TD need to confirm that a sponsored capstone qualifies? | New. Measured and proposed in `docs/fraud_dataset_recommendation.md`. Not started |
 | 11 | Should the split by time be reported for Credit Card Fraud as a sensitivity check? | New |
 | 12 | Should the `raw` arm keep missing values (and skip models that reject NaN), or get a minimal fill so every model runs? | New. The baseline runs currently use the minimal fill (section 5.4) |
 | 13 | Diversity and discriminator-feedback checks are reported only until calibrated. Is that acceptable for the first gate? | New |
