@@ -10,7 +10,7 @@ The mentors' question was whether to proceed, adjust or replace this dataset. I 
 2. **Use the stratified 60/20/20 split as the primary split**, made after the duplicates are dropped. Report a split by time as a sensitivity check.
 3. **Set the fill-level grid per dataset.** For this dataset use 0.01, 0.02, 0.05 and 0.10, not the default grid that goes up to 1.0.
 4. **Treat it as the stress case.** With 284 training positives, a result of no gain from synthetic data is expected and is a reportable result.
-5. **Optionally add IEEE-CIS as a second fraud dataset.** It cannot be merged into this one. Details below.
+5. **Add a second fraud dataset, as its own run.** Rows cannot be merged into this one. IEEE-CIS is the best real candidate, and the vehicle insurance claims set is a small, CC0 option that fits the 500 to 1,000 range. Details below.
 
 ## 1. Duplicates
 
@@ -90,20 +90,22 @@ The issue asked for real, non-simulated datasets that could add fraud rows. The 
 | Candidate | Real? | Size and fraud | Features | Licence and access | Verdict |
 |---|---|---|---|---|---|
 | ULB / Worldline (current) | Real, 2 days in Sept 2013 | 284,807 rows, 492 fraud (0.17%) | `Time`, `Amount`, V1 to V28 (PCA) | Database Contents License v1.0 per the benchmark below and a 2024 paper. A Kaggle metadata copy lists ODbL, so check the Kaggle page | Keep, with the adjustments above |
-| IEEE-CIS (Vesta) | Real, donated by Vesta | 590,540 transactions, 20,663 fraud (3.5%) | About 390 to 430 masked columns in a transaction and an identity table, many missing values | Kaggle competition rules apply and must be accepted to download. I could not read the rules, so the terms of use are unconfirmed. The IEEE DataPort copy needs a subscription | Best candidate as a second dataset, not a merge |
-| Feedzai Bank Account Fraud (NeurIPS 2022) | Synthetic, generated from an anonymized real dataset | Size and fraud rate not confirmed from the pages I read | Tabular, with built-in bias variants | Code is Apache-2.0. A 2025 paper says the data is CC BY-NC-ND 4.0 on Kaggle (secondary source) | Exclude: synthetic. Possible later as a labelled-synthetic comparison |
-| Fraud ecommerce (Kaggle, vbinh002) | Provenance not documented | About 151,000 rows, 9.3% to 10.6% fraud depending on source | Device id, browser, IP, purchase value, sign-up time | No licence stated | Exclude until provenance is known |
-| Credit Card Fraud Detection Dataset 2023 (Kaggle) | Unverified. I could not read the page | Third parties report 550,000+ rows. Class balance unverified | V1 to V28, Amount, Class | Not readable | Exclude: cannot certify as real |
+| IEEE-CIS (Vesta) | Real, donated by Vesta | 590,540 transactions, 20,663 fraud (3.5%) | About 390 to 430 masked columns in a transaction and an identity table, many missing values | Kaggle competition rules, read on 16 October: the data may be used for non-commercial purposes, including academic research and education (section 7A), and may not be redistributed (7B). Each user must accept the rules to download. The IEEE DataPort copy needs a subscription | Best real candidate for a second dataset, not a merge |
+| Vehicle insurance claims (Kaggle, shivamb) | Source listed as "Oracle Databases", collected by web download. Whether it is real or sample data is not documented | About 15,420 rows and 923 fraud (6%), from a paper that used the file. The Kaggle page does not show the counts | 32 mixed numeric and categorical columns, `FraudFound_P` target, `fraud_oracle.csv` 3.6 MB | CC0 (public domain), per the Kaggle page | Second candidate. About 554 training fraud rows, in the mentors' range. A different fraud type. Label its real or sample status as unverified |
+| Elliptic (Bitcoin transactions) | Real, from the Bitcoin blockchain | 203,769 nodes, of which 4,545 illicit and 42,019 licit are labelled | 166 anonymised numeric features, 49 time steps, a transaction graph | CC BY-NC-ND 4.0 per the Kaggle page. NoDerivatives means synthetic data made from it could not be shared | Not recommended: cryptocurrency, anonymised features, and the licence conflicts with sharing synthetic data |
+| Feedzai Bank Account Fraud (NeurIPS 2022) | Synthetic. The Kaggle page says it was built from a real dataset with differential-privacy noise, feature encoding and a CTGAN generator | 1 million rows per variant, 30 features, about 11,000 fraud rows (1.1%) in the base file | Tabular, with built-in bias variants | CC BY-NC-SA 4.0 per the Kaggle page | Exclude: synthetic, and made with CTGAN, so a GAN on it would be circular |
+| Fraud ecommerce (Kaggle, vbinh002) | The Kaggle page has no description. Real or synthetic is not documented | About 151,000 rows and 14,000 fraud (9.4%), from papers. `Fraud_Data.csv` is 16 MB with 10 columns plus a label | User id, device id, browser, IP address, purchase value, sign-up and purchase times, 2015 | Licence listed as "Unknown" | Exclude until provenance and licence are known |
+| Credit Card Fraud Detection Dataset 2023 (Kaggle) | Described as European cardholders in 2023. No further provenance | Over 550,000 rows (325 MB). The class balance is not on the page | `id`, V1 to V28 (anonymised again), Amount, Class | "Other (specified in description)", but the description gives no licence | Exclude: no provenance or licence, and anonymised features that cannot be pooled with ULB |
 | Sparkov simulated (Kaggle) | Simulated | 1.3 million rows, 5.7% fraud | Synthetic | CC0 1.0 | Exclude: simulated |
 
 ### If we add IEEE-CIS
 
 - **Why it is attractive.** It has about 20,000 fraud rows, so a generator has thousands of real positives to learn from, unlike ULB. It has masked raw features, so it is not PCA-encoded. It also has real missing values, which makes it a second testbed for the data-repair step.
 - **Why it is not free.**
-  - Each team member must accept the Kaggle competition rules to download it. I could not confirm that our use is permitted, so someone should read the rules page first.
+  - Each team member must accept the Kaggle competition rules to download it. The rules allow non-commercial use including academic research and education, and forbid redistribution. So the data must never be committed or shared outside the people who accepted the rules, and synthetic data made from it should stay private. Whether a TD-sponsored capstone counts as non-commercial is a question for TD.
   - It is large (about 590,000 rows by 390 or more columns). The Fraud Dataset Benchmark keeps 67 of 393 features, which is a reasonable starting point.
   - It needs its own preprocessing, a time-aware split and a new set of fill levels.
-- **Recommendation.** Raise it with the mentors on 16 October. Do not start it this sprint.
+- **Recommendation.** Raise it with the mentors on 16 October, together with the vehicle insurance claims set as a quick option. Do not start either before they answer.
 
 ## 5. What this changes in the pipeline
 
@@ -117,7 +119,7 @@ These need team agreement before anyone builds them:
 ## Questions for the mentors
 
 1. Is ULB acceptable as the extreme-imbalance stress case, with a no-gain result reported as a result?
-2. Is a second fraud dataset such as IEEE-CIS wanted, given the compute and the Kaggle terms?
+2. Which second fraud dataset is wanted: IEEE-CIS (real, large, non-commercial terms), the vehicle insurance claims set (CC0, small, origin undocumented), or both?
 3. Do they want the time split reported as a sensitivity check?
 
 ## Sources
@@ -127,4 +129,4 @@ These need team agreement before anyone builds them:
 - [Bank Account Fraud (Feedzai)](https://github.com/feedzai/bank-account-fraud) and the [NeurIPS 2022 paper](https://arxiv.org/abs/2211.13358)
 - [ULB credit card fraud dataset on Kaggle](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
 
-Dataset descriptions marked unverified come from secondary sources, because Kaggle pages could not be read from here. Licence terms should be confirmed on the Kaggle pages before any download.
+Dataset pages and the IEEE-CIS rules were read in a browser on 16 October. Counts for IEEE-CIS (from the Fraud Dataset Benchmark), the vehicle insurance claims set (from a paper) and Fraud ecommerce (from papers) come from secondary sources, and the Kaggle pages do not state whether the vehicle insurance and Fraud ecommerce data are real. Nothing was downloaded.
