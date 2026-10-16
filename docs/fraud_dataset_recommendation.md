@@ -10,7 +10,7 @@ The mentors' question was whether to proceed, adjust or replace this dataset. I 
 2. **Use the stratified 60/20/20 split as the primary split**, made after the duplicates are dropped. Report a split by time as a sensitivity check.
 3. **Set the fill-level grid per dataset.** For this dataset use 0.01, 0.02, 0.05 and 0.10, not the default grid that goes up to 1.0.
 4. **Treat it as the stress case.** With 284 training positives, a result of no gain from synthetic data is expected and is a reportable result.
-5. **Add a second fraud dataset, as its own run.** Rows cannot be merged into this one. IEEE-CIS is the best real candidate, and the vehicle insurance claims set is a small, CC0 option that fits the 500 to 1,000 range. Details below.
+5. **Add IEEE-CIS as a second fraud dataset, as its own run, under the data-use restrictions in section 4.** Rows cannot be merged into this dataset. IEEE-CIS is the one real, large candidate. The other candidates were set aside (section 4).
 
 ## 1. Duplicates
 
@@ -91,7 +91,7 @@ The issue asked for real, non-simulated datasets that could add fraud rows. The 
 |---|---|---|---|---|---|
 | ULB / Worldline (current) | Real, 2 days in Sept 2013 | 284,807 rows, 492 fraud (0.17%) | `Time`, `Amount`, V1 to V28 (PCA) | Database Contents License v1.0 per the benchmark below and a 2024 paper. A Kaggle metadata copy lists ODbL, so check the Kaggle page | Keep, with the adjustments above |
 | IEEE-CIS (Vesta) | Real, donated by Vesta | 590,540 transactions, 20,663 fraud (3.50%), measured on `train_transaction.csv`. 24.4% have an identity record | About 390 to 430 masked columns in a transaction and an identity table, many missing values | Kaggle competition rules, read on 16 October: the data may be used for non-commercial purposes, including academic research and education (section 7A), and may not be redistributed (7B). Each user must accept the rules to download. The IEEE DataPort copy needs a subscription | Best real candidate for a second dataset, not a merge |
-| Vehicle insurance claims (Kaggle, shivamb) | Source listed as "Oracle Databases", collected by web download. Whether it is real or sample data is not documented | 15,420 rows and 923 fraud (5.99%), measured on the downloaded file. 554 / 185 / 184 fraud in a stratified 60/20/20 split | 32 mixed numeric and categorical columns, `FraudFound_P` target, `fraud_oracle.csv` 3.6 MB | CC0 (public domain), per the Kaggle page | Second candidate. 554 training fraud rows, in the mentors' range. A different fraud type. Clean (no duplicates, no missing values apart from placeholders). Boosting scores 0.28 validation PR-AUC against 0.06 chance. Label its real or sample status as unverified |
+| Vehicle insurance claims (Kaggle, shivamb) | Source listed as "Oracle Databases", collected by web download. Whether it is real or sample data is not documented | 15,420 rows and 923 fraud (5.99%), measured on the downloaded file. 554 / 185 / 184 fraud in a stratified 60/20/20 split | 32 mixed numeric and categorical columns, `FraudFound_P` target, `fraud_oracle.csv` 3.6 MB | CC0 (public domain), per the Kaggle page | Set aside, kept as a quick dry-run option. 554 training fraud rows, in the mentors' range. A different fraud type. Clean (no duplicates, no missing values apart from placeholders). Boosting scores 0.28 validation PR-AUC against 0.06 chance. Label its real or sample status as unverified |
 | Elliptic (Bitcoin transactions) | Real, from the Bitcoin blockchain | 203,769 nodes, of which 4,545 illicit and 42,019 licit are labelled | 166 anonymised numeric features, 49 time steps, a transaction graph | CC BY-NC-ND 4.0 per the Kaggle page. NoDerivatives means synthetic data made from it could not be shared | Not recommended: cryptocurrency, anonymised features, and the licence conflicts with sharing synthetic data |
 | Feedzai Bank Account Fraud (NeurIPS 2022) | Synthetic. The Kaggle page says it was built from a real dataset with differential-privacy noise, feature encoding and a CTGAN generator | 1 million rows per variant, 30 features, about 11,000 fraud rows (1.1%) in the base file | Tabular, with built-in bias variants | CC BY-NC-SA 4.0 per the Kaggle page | Exclude: synthetic, and made with CTGAN, so a GAN on it would be circular |
 | Fraud ecommerce (Kaggle, vbinh002) | The Kaggle page has no description. Real or synthetic is not documented | 151,112 rows and 14,151 fraud (9.36%), measured. `Fraud_Data.csv` is 16 MB with 10 columns plus a label | User id, device id, browser, IP address, purchase value, sign-up and purchase times, 2015 | Licence listed as "Unknown" | Exclude. Every one of the 7,600 purchases made within 60 seconds of sign-up is fraud (54% of its fraud), which looks like a rule or simulation, and provenance and licence are unknown |
@@ -119,14 +119,33 @@ Things worth knowing:
 - **Vehicle insurance claims.** `PolicyNumber` is just the row number (1 to 15,420). The fraud rate varies a lot by policy type (13.8% for Sport - Collision, 0.7% for Sedan - Liability). Nothing in the file shows whether it is real or a sample dataset.
 - **Fraud ecommerce.** The 7,600 purchases within a minute of sign-up are all fraud, and devices shared by several users are 52.5% fraud. A GAN test on it would mostly learn those rules.
 
-### If we add IEEE-CIS
+### Adding IEEE-CIS
 
-- **Why it is attractive.** It has about 20,000 fraud rows, so a generator has thousands of real positives to learn from, unlike ULB. It has masked raw features, so it is not PCA-encoded. It also has real missing values, which makes it a second testbed for the data-repair step.
-- **Why it is not free.**
-  - Each team member must accept the Kaggle competition rules to download it. The rules allow non-commercial use including academic research and education, and forbid redistribution. So the data must never be committed or shared outside the people who accepted the rules, and synthetic data made from it should stay private. Whether a TD-sponsored capstone counts as non-commercial is a question for TD.
-  - It is large (about 590,000 rows by 390 or more columns). The Fraud Dataset Benchmark keeps 67 of 393 features, which is a reasonable starting point.
-  - It needs its own preprocessing, a time-aware split and a new set of fill levels.
-- **Recommendation.** Raise it with the mentors on 16 October, together with the vehicle insurance claims set as a quick option. Do not start either before they answer.
+**Why.** It has 20,663 fraud rows (12,398 in a stratified train part), so a generator has thousands of real positives to learn from, unlike ULB. Its features are masked raw columns, not PCA components. Its fraud rate is steady over time (3.38%, 3.90%, 3.44% across a time split). It has real missing values, so it is a second testbed for the data-repair step.
+
+**Plan if approved** (not started):
+
+1. Each member who will use it accepts the competition rules and downloads their own copy of `train_transaction.csv` and `train_identity.csv`.
+2. Join the identity table (24.4% of rows have a record), take a 100k stratified subsample that keeps the 3.5% fraud rate (2,099 training fraud rows), and keep the columns with at most 5% to 20% missing (109 to 179 columns).
+3. Same split policy as ULB: stratified 60/20/20 as primary and a time split as a check. Fill levels 0.10 to 1.00 add 5,580 to 55,802 rows (2.7 to 27 times the real positives).
+4. Add it to `utils/datasets.json` and the run config, with its discrete columns, so the preprocessing script and CTGAN tool can read it.
+
+**Data-use restrictions** (Kaggle competition rules, section 7, read on 16 October):
+
+| Rule | What it means for us |
+|---|---|
+| 7A: use for non-commercial purposes only, including academic research and education | A capstone is education. Whether TD's sponsorship counts as commercial is a question for TD, not something we can settle |
+| 7B: no transmitting, duplicating, publishing or redistributing the data to anyone who has not accepted the rules | Never commit it, put it in Drive, Slack or email, or hand it to mentors. Each person downloads their own copy. `data/external/` is ignored by git for this reason |
+| Account and acceptance | One Kaggle account per person, and each person accepts the rules before downloading |
+
+Our reading of what the rules do not say, to confirm with the mentors or TD:
+
+- Synthetic rows generated from the data may count as derived from it, so they stay private (inside `runs/`, which is ignored by git) and are not published.
+- The report and poster show aggregate results (metrics, plots of distributions), not rows.
+
+**Set aside.** The vehicle insurance claims set (CC0, 554 training fraud rows, moderate signal, real or sample status unknown) stays available as a quick dry-run dataset. Fraud ecommerce, Elliptic, Bank Account Fraud, Sparkov and the 2023 card data are excluded for the reasons in the table above.
+
+**Recommendation.** Ask the mentors on 16 October. Do not download further, build the subsample or change the config before they answer.
 
 ## 5. What this changes in the pipeline
 
@@ -140,7 +159,7 @@ These need team agreement before anyone builds them:
 ## Questions for the mentors
 
 1. Is ULB acceptable as the extreme-imbalance stress case, with a no-gain result reported as a result?
-2. Which second fraud dataset is wanted: IEEE-CIS (real, large, non-commercial terms), the vehicle insurance claims set (CC0, small, origin undocumented), or both?
+2. Do they agree to IEEE-CIS as the second fraud dataset, under its non-commercial and no-redistribution terms? Does TD need to confirm that a sponsored capstone qualifies?
 3. Do they want the time split reported as a sensitivity check?
 
 ## Sources

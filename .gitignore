@@ -10,6 +10,9 @@ eda/output/
 # Pipeline run outputs (created by the orchestrator)
 runs/
 
+# Third-party data we may not redistribute (IEEE-CIS: Kaggle rules, section 7B)
+data/external/
+
 # API keys and secrets
 .env
 eda/framework_spike/benchmark_*.jsonl
