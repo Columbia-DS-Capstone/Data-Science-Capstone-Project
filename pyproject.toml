@@ -8,6 +8,7 @@ dependencies = [
     "catboost>=1.2.10",
     "ctgan>=0.12.1",
     "imbalanced-learn>=0.14.2",
+    "langgraph>=1.2.15",
     "lightgbm>=4.7.0",
     "matplotlib>=3.11.2",
     "numpy>=2.4.6",

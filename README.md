@@ -40,6 +40,9 @@ This capstone investigates whether synthetic-data generation and automated data-
 
 To add a package, run `uv add <package>`, then commit both `pyproject.toml` and `uv.lock`. Don't use pip, conda or a requirements.txt.
 
+Run the placeholder orchestrator with `uv run python -m agentic_gan.orchestrator --dataset bank_marketing`. It creates a folder under `runs/` with typed stub outputs, a manifest, `decisions.jsonl`, and a report. The stubs do not train models or evaluate the dataset.
+Print its LangGraph Mermaid diagram with `uv run python -m agentic_gan.orchestrator --diagram`.
+
 ## Repository layout
 
 - `src/agentic_gan/`: the system (orchestrator, agents, tools, schemas)
