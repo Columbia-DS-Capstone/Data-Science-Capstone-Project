@@ -16,10 +16,10 @@ from pathlib import Path
 import pandas as pd
 
 from agentic_gan.tools.baselines import run_models
-from agentic_gan.tools.ctgan import IS_SYNTHETIC, fill_counts
 from agentic_gan.tools.preprocessing import Preprocessor
 from agentic_gan.tools.smotenc import smotenc_rows
 from agentic_gan.utils.datasets import DATASETS, DatasetConfig
+from agentic_gan.utils.synthetic import IS_SYNTHETIC, fill_counts
 
 ROOT = Path(__file__).resolve().parents[3]
 ID_COLUMN = "source_row"

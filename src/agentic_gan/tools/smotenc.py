@@ -15,7 +15,7 @@ import pandas as pd
 from imblearn.over_sampling import SMOTENC
 from sklearn.preprocessing import StandardScaler
 
-IS_SYNTHETIC = "is_synthetic"
+from agentic_gan.utils.synthetic import IS_SYNTHETIC
 
 
 def smotenc_rows(

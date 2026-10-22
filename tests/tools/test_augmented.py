@@ -2,8 +2,8 @@ import pandas as pd
 import pytest
 
 from agentic_gan.tools.augmented import check_holdouts, load_cleaned, run_experiment, summarize
-from agentic_gan.tools.ctgan import fill_counts
 from agentic_gan.utils.datasets import DATASETS
+from agentic_gan.utils.synthetic import fill_counts
 
 CONFIG = DATASETS["bank_marketing"]
 
