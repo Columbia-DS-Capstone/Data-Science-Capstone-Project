@@ -1,10 +1,571 @@
-"""Model Training Agent tools; callers supply real holdouts and each arm's training rows."""
+"""Train the frozen Sprint 2 suite and return audited, typed artifacts.
 
+The file-based agent consumes unencoded raw/cleaned splits with source_row IDs.
+Only training rows may be augmented. Thresholds are never tuned by this agent.
+"""
+
+import json
+import re
+import warnings
+from dataclasses import asdict, replace
+from pathlib import Path
+
+import joblib
+import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import RepeatedStratifiedKFold
+from threadpoolctl import threadpool_limits
 
+from agentic_gan.orchestrator.decisions import log_decision
+from agentic_gan.orchestrator.manifest import RunDir
+from agentic_gan.schemas import Arm, ModelRecord, Status, TrainingOutput, TrainingRequest, fill_rows
+from agentic_gan.tools import baselines as baselines
 from agentic_gan.tools.baselines import load_protocol, run_models
+from agentic_gan.tools.preprocessing import Preprocessor, load_dataset, normalize
+from agentic_gan.tools.smotenc import smotenc_rows
+from agentic_gan.utils.datasets import load_configs
+from agentic_gan.utils.files import sha256_file
+from agentic_gan.utils.synthetic import IS_SYNTHETIC
 
-__all__ = ["run_models", "run_training_arms"]
+__all__ = ["run_models", "run_training", "run_training_arms"]
+
+ROOT = Path(__file__).resolve().parents[3]
+PARTS = ("train", "validation", "test")
+METRICS = ("pr_auc", "f1", "precision", "recall", "roc_auc", "accuracy")
+ARM_LABELS = {Arm.RAW: "original", Arm.BASELINE: "cleaned", Arm.SMOTE: "smotenc", Arm.GAN: "ctgan"}
+
+
+class ArmEncoder(TransformerMixin, BaseEstimator):
+    """Cloneable encoder that excludes synthetic rows even inside stacking folds."""
+
+    def __init__(self, config, original=False):
+        self.config = config
+        self.original = original
+
+    def fit(self, X, y):
+        real = X[IS_SYNTHETIC].eq(0).to_numpy()
+        if not real.any():
+            raise ValueError("Encoder fit needs real training rows")
+        data = X.drop(columns=IS_SYNTHETIC).loc[real].copy()
+        self.fit_rows_ = len(data)
+        if self.original:
+            self.encoder_ = baselines._minimal_transformer(
+                data, self.config.discrete, self.config.imputation
+            ).fit(data)
+        else:
+            data[self.config.target] = np.asarray(y)[real]
+            self.encoder_ = Preprocessor(
+                self.config, self.config.imputation, self.config.include_duration
+            ).fit(data)
+        return self
+
+    def transform(self, X):
+        data = X.drop(columns=IS_SYNTHETIC)
+        if self.original:
+            return self.encoder_.transform(data)
+        return self.encoder_.transform_cleaned(data).to_numpy()
+
+
+def _read_real(files, config, run):
+    tables = {}
+    for part, field in zip(PARTS, ("train_path", "val_path", "test_path"), strict=True):
+        data = pd.read_csv(run.root / getattr(files, field))
+        if IS_SYNTHETIC in data:
+            if not data[IS_SYNTHETIC].eq(0).all():
+                raise ValueError(f"{part} contains synthetic rows or invalid provenance")
+            data = data.drop(columns=IS_SYNTHETIC)
+        if "source_row" not in data:
+            raise ValueError(f"{part} needs source_row IDs to verify the frozen split")
+        ids = data.pop("source_row")
+        if ids.isna().any() or ids.duplicated().any() or not pd.api.types.is_integer_dtype(ids):
+            raise ValueError(f"{part} has invalid or duplicate source_row IDs")
+        if (ids < 0).any():
+            raise ValueError("Real source_row IDs must be nonnegative")
+        data.index = pd.Index(ids, name="source_row")
+        if config.target not in data or data.empty:
+            raise ValueError(f"{part} must be nonempty and include the target")
+        # Mapping labels is fixed semantics, not a fitted transformation.
+        data[config.target] = normalize(data, config, config.include_duration)[config.target]
+        if set(data[config.target]) != {0, 1}:
+            raise ValueError(f"{part} must contain both binary classes")
+        tables[part] = data
+    for a, b in (("train", "validation"), ("train", "test"), ("validation", "test")):
+        if not tables[a].index.intersection(tables[b].index).empty:
+            raise ValueError(f"{a} and {b} share source rows")
+    return tables
+
+
+def _same_table(actual, expected, label):
+    try:
+        pd.testing.assert_frame_equal(
+            actual, expected, check_dtype=False, check_exact=False, rtol=1e-10, atol=1e-12
+        )
+    except AssertionError as exc:
+        raise ValueError(f"{label} differs from the frozen source/training-only cleaning") from exc
+
+
+def _inputs(request, run, protocol_path):
+    cfg = request.config
+    if cfg.calibrate or cfg.excluded_features:
+        raise ValueError("Calibration or new feature exclusions require a new frozen protocol")
+    config = load_configs()[cfg.dataset_name]
+    config = replace(config, split={**config.split, "seed": cfg.split_seed})
+    expected_positive = "yes" if cfg.dataset_name == "bank_marketing" else 1
+    if cfg.positive_class not in (expected_positive, 1):
+        raise ValueError("positive_class differs from the frozen target mapping")
+    if cfg.target != config.target or cfg.split_ratios.model_dump() != {
+        "train": config.split["train"],
+        "val": config.split["validation"],
+        "test": config.split["test"],
+    }:
+        raise ValueError("Run target/split ratios differ from the frozen dataset configuration")
+    raw = _read_real(request.raw, config, run)
+    cleaned = _read_real(request.baseline, config, run)
+    metadata = {
+        "source_sha256": sha256_file(cfg.dataset_path),
+        "split_hashes": {part: baselines._digest(t.index.tolist()) for part, t in raw.items()},
+        "config": asdict(config),
+    }
+    # The protocol's seed fixes the SPLIT and reference thresholds. Model seeds vary below.
+    protocol = load_protocol(
+        protocol_path,
+        seed=cfg.split_seed,
+        cv_folds=3,
+        metadata=metadata,
+        y_val=raw["validation"][cfg.target],
+        y_test=raw["test"][cfg.target],
+    )
+    if protocol["dataset"] != cfg.dataset_name:
+        raise ValueError("Frozen protocol belongs to a different dataset")
+    if set(cfg.candidate_models) != set(protocol["models"]):
+        raise ValueError("candidate_models must contain exactly the frozen five-model suite")
+    source = load_dataset(config, cfg.dataset_path)
+    source[cfg.target] = normalize(source, config, config.include_duration)[cfg.target]
+    for part, data in raw.items():
+        if not data.index.isin(source.index).all():
+            raise ValueError(f"{part} has source_row IDs outside the source data")
+        _same_table(data, source.loc[data.index], f"raw {part}")
+    cleaner = Preprocessor(config, config.imputation, config.include_duration).fit(raw["train"])
+    for part in PARTS:
+        expected = cleaner.clean(raw[part])
+        # CSV inference can turn string category codes back into numeric values.
+        actual = cleaned[part].copy()
+        for column in cleaner.discrete:
+            actual[column] = actual[column].map(
+                lambda v: (
+                    str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else str(v)
+                )
+            )
+        _same_table(actual, expected, f"cleaned {part}")
+        cleaned[part] = actual
+    return config, raw, cleaned, protocol
+
+
+def _synthetic(data, real, target, count):
+    if len(data) != count:
+        raise ValueError(f"Synthetic row count {len(data)} does not match fill level ({count})")
+    if set(data.columns) != {*real.columns, IS_SYNTHETIC}:
+        raise ValueError("Synthetic schema must match cleaned features/target plus is_synthetic")
+    if not data[IS_SYNTHETIC].eq(1).all() or not data[target].eq(1).all():
+        raise ValueError("Synthetic rows must be flagged and belong to positive class 1")
+    if data.isna().any().any():
+        raise ValueError("Synthetic data must be cleaned and nonmissing")
+    data = data.drop(columns=IS_SYNTHETIC)[real.columns].copy()
+    for col in real.drop(columns=target):
+        if not pd.api.types.is_numeric_dtype(real[col]):
+            data[col] = data[col].map(
+                lambda v: (
+                    str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else str(v)
+                )
+            )
+        elif not np.isfinite(pd.to_numeric(data[col], errors="raise")).all():
+            raise ValueError(f"Synthetic column {col} has nonfinite values")
+    if data.isna().any().any():
+        raise ValueError("Synthetic data must be cleaned and nonmissing")
+    return data
+
+
+def _model_data(table, config, *, original=False, synthetic=None):
+    data = table.copy()
+    data[IS_SYNTHETIC] = 0
+    if synthetic is not None:
+        data = pd.concat([data, synthetic.assign(**{IS_SYNTHETIC: 1})], ignore_index=True)
+    if original and config.name == "bank_marketing" and not config.include_duration:
+        data = data.drop(columns="duration", errors="ignore")
+    return data.drop(columns=config.target), data[config.target]
+
+
+def _arm_sets(config, raw, cleaned, levels, accepted, seed):
+    yield Arm.RAW, None, raw, None, None
+    yield Arm.BASELINE, None, cleaned, None, None
+    train = cleaned["train"]
+    positives = int(train[config.target].sum())
+    counts = {lv: fill_rows(lv, positives, len(train) - positives) for lv in levels}
+    maximum = max(counts.values())
+    pool, error = None, None
+    if maximum:
+        try:
+            pool = smotenc_rows(
+                train.reset_index(drop=True),
+                config.target,
+                maximum,
+                discrete_columns=config.discrete,
+                seed=seed,
+                k_neighbors=min(5, positives - 1),
+            )
+        except Exception as exc:
+            error = f"SMOTENC generation failed: {type(exc).__name__}: {exc}"
+    for level, count in counts.items():
+        if not count:
+            yield Arm.SMOTE, level, cleaned, None, "SKIPPED: fill level adds zero rows"
+        elif error:
+            yield Arm.SMOTE, level, cleaned, None, error
+        else:
+            yield (
+                Arm.SMOTE,
+                level,
+                cleaned,
+                _synthetic(pool.head(count), train, config.target, count),
+                None,
+            )
+    for level, extra in accepted.items():
+        yield Arm.GAN, level, cleaned, extra, None
+
+
+def _prediction_table(table, target, probabilities, threshold):
+    return pd.DataFrame(
+        {
+            "source_row": table.index,
+            "y_true": table[target].to_numpy(),
+            "probability": probabilities,
+            "prediction": (probabilities >= threshold).astype(int),
+            "threshold": threshold,
+            IS_SYNTHETIC: 0,
+        }
+    )
+
+
+def _fit_record(arm, level, tables, extra, error, name, estimator, seed, config, protocol, folder):
+    fields = dict(
+        arm=arm,
+        fill_level=level,
+        model=name,
+        seed=seed,
+        threshold=protocol["thresholds"][name],
+        protocol_id=protocol["protocol_id"],
+        hyperparameters=json.loads(json.dumps(estimator.get_params(deep=True), default=str)),
+        training_rows=len(tables["train"]) + (0 if extra is None else len(extra)),
+        synthetic_rows=0 if extra is None else len(extra),
+    )
+    if error:
+        status = Status.SKIPPED if error.startswith("SKIPPED:") else Status.FAILED
+        return ModelRecord(status=status, reason=error, **fields)
+    caught = []
+    try:
+        original = arm is Arm.RAW
+        X, y = _model_data(tables["train"], config, original=original, synthetic=extra)
+        estimator = baselines._with_preprocessing(estimator, ArmEncoder(config, original))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            estimator.fit(X, y)
+            predictions, metrics = {}, {}
+            for part in ("validation", "test"):
+                features, labels = _model_data(tables[part], config, original=original)
+                probabilities = estimator.predict_proba(features)[:, 1]
+                metrics[part] = baselines.metric_row(
+                    labels, probabilities, threshold=fields["threshold"]
+                )
+                predictions[part] = _prediction_table(
+                    tables[part], config.target, probabilities, fields["threshold"]
+                )
+        stem = f"{arm.value}_{level or 0:g}_{seed}_{re.sub('[^a-z0-9]+', '_', name.lower())}"
+        model_path = folder / f"{stem}.joblib"
+        paths = {part: folder / f"{stem}_{part}.csv" for part in predictions}
+        joblib.dump(
+            {
+                "estimator": estimator,
+                "threshold": fields["threshold"],
+                "protocol_id": fields["protocol_id"],
+                "features": list(X.columns),
+            },
+            model_path,
+        )
+        for part, data in predictions.items():
+            data.to_csv(paths[part], index=False)
+        return ModelRecord(
+            status=Status.SUCCESS,
+            model_path=model_path,
+            val_predictions_path=paths["validation"],
+            test_predictions_path=paths["test"],
+            val_metrics=metrics["validation"],
+            test_metrics=metrics["test"],
+            warnings=sorted({str(w.message) for w in caught}),
+            **fields,
+        )
+    except Exception as exc:
+        return ModelRecord(
+            status=Status.FAILED,
+            reason=f"{type(exc).__name__}: {exc}",
+            warnings=sorted({str(w.message) for w in caught}),
+            **fields,
+        )
+
+
+def _save_metrics(records, dataset, folder):
+    rows = []
+    for record in records:
+        for split, scores in (("validation", record.val_metrics), ("test", record.test_metrics)):
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "arm": ARM_LABELS[record.arm],
+                    "fill_level": record.fill_level or 0.0,
+                    "seed": record.seed,
+                    "model": record.model,
+                    "split": split,
+                    "status": record.status.value,
+                    "reason": record.reason,
+                    "selected": record.selected,
+                    "training_rows": record.training_rows,
+                    "n_synthetic": record.synthetic_rows,
+                    "protocol_id": record.protocol_id,
+                    "threshold": record.threshold,
+                    **{metric: scores.get(metric, np.nan) for metric in METRICS},
+                }
+            )
+    table = pd.DataFrame(rows)
+    path = folder / "metrics.csv"
+    table.to_csv(path, index=False)
+    valid = table[(table.split == "validation") & (table.status == Status.SUCCESS.value)]
+    summary = valid.groupby(["dataset", "arm", "fill_level", "model"], sort=False)[
+        list(METRICS)
+    ].agg(["mean", "std", "count"])
+    summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
+    summary_path = folder / "validation_summary.csv"
+    summary.reset_index().to_csv(summary_path, index=False)
+    return path, summary_path
+
+
+def _repeated_cv(request, config, raw, protocol, folder, cv_gan_factory):
+    """Repeated real-row CV; only threshold-independent PR/ROC AUC are estimated.
+
+    The frozen cutoff already used the original validation labels, so reporting
+    CV F1 on train+validation would reuse calibration labels. Test is never read here.
+    A CTGAN factory must refit AND quality-check using only the supplied fold training data.
+    Without it, CTGAN CV is explicitly skipped; full-split GAN evaluation still runs.
+    """
+    cfg = request.config
+    combined = pd.concat([raw["train"], raw["validation"]])
+    if combined[config.target].value_counts().min() < cfg.training_cv_folds:
+        raise ValueError("Too few rows per class for repeated CV")
+    splitter = RepeatedStratifiedKFold(
+        n_splits=cfg.training_cv_folds,
+        n_repeats=cfg.training_cv_repeats,
+        random_state=cfg.split_seed,
+    )
+    scores, predictions = [], []
+    for index, (fit_ids, eval_ids) in enumerate(splitter.split(combined, combined[config.target])):
+        repeat, fold = divmod(index, cfg.training_cv_folds)
+        fold_raw = {"train": combined.iloc[fit_ids], "validation": combined.iloc[eval_ids]}
+        cleaner = Preprocessor(config, config.imputation, config.include_duration).fit(
+            fold_raw["train"]
+        )
+        fold_cleaned = {part: cleaner.clean(data) for part, data in fold_raw.items()}
+        for seed in cfg.seeds:
+            # Separate reproducible generator randomness from the fixed row partition.
+            generation_seed = int(np.random.SeedSequence([seed, repeat, fold]).generate_state(1)[0])
+            accepted = {}
+            if cv_gan_factory is not None:
+                train = fold_cleaned["train"]
+                positives = int(train[config.target].sum())
+                for item in request.accepted_synthetic:
+                    n = fill_rows(item.fill_level, positives, len(train) - positives)
+                    if n:
+                        extra = cv_gan_factory(train.copy(), n, generation_seed)
+                        accepted[item.fill_level] = _synthetic(extra, train, config.target, n)
+            arms = list(
+                _arm_sets(
+                    config, fold_raw, fold_cleaned, cfg.fill_levels, accepted, generation_seed
+                )
+            )
+            arms += [
+                (
+                    Arm.GAN,
+                    item.fill_level,
+                    fold_cleaned,
+                    None,
+                    "CTGAN CV needs a fold-fitted, quality-checked cv_gan_factory"
+                    if cv_gan_factory is None
+                    else "SKIPPED: fill level adds zero rows",
+                )
+                for item in request.accepted_synthetic
+                if item.fill_level not in accepted
+            ]
+            for arm, level, tables, extra, error in arms:
+                for name, model in baselines.build_models(seed).items():
+                    row = dict(
+                        arm=ARM_LABELS[arm],
+                        fill_level=level or 0.0,
+                        model=name,
+                        seed=seed,
+                        repeat=repeat,
+                        fold=fold,
+                        protocol_id=protocol["protocol_id"],
+                        status=Status.SUCCESS.value,
+                        reason="",
+                        pr_auc=np.nan,
+                        roc_auc=np.nan,
+                    )
+                    if error:
+                        row.update(
+                            status=Status.SKIPPED.value
+                            if arm is Arm.GAN or error.startswith("SKIPPED:")
+                            else Status.FAILED.value,
+                            reason=error,
+                        )
+                    else:
+                        try:
+                            X, y = _model_data(
+                                tables["train"], config, original=arm is Arm.RAW, synthetic=extra
+                            )
+                            val, labels = _model_data(
+                                tables["validation"], config, original=arm is Arm.RAW
+                            )
+                            fitted = baselines._with_preprocessing(
+                                model, ArmEncoder(config, arm is Arm.RAW)
+                            )
+                            fitted.fit(X, y)
+                            probabilities = fitted.predict_proba(val)[:, 1]
+                            probabilities = baselines._probabilities(labels, probabilities)
+                            row.update(
+                                pr_auc=baselines.pr_auc_score(labels, probabilities),
+                                roc_auc=roc_auc_score(labels, probabilities),
+                            )
+                            predictions.append(
+                                pd.DataFrame(
+                                    {
+                                        **{
+                                            k: v
+                                            for k, v in row.items()
+                                            if k not in ("pr_auc", "roc_auc")
+                                        },
+                                        "source_row": tables["validation"].index,
+                                        "y_true": labels.to_numpy(),
+                                        "probability": probabilities,
+                                        IS_SYNTHETIC: 0,
+                                    }
+                                )
+                            )
+                        except Exception as exc:
+                            row.update(
+                                status=Status.FAILED.value, reason=f"{type(exc).__name__}: {exc}"
+                            )
+                    scores.append(row)
+    score_path, pred_path = folder / "cv_metrics.csv", folder / "cv_predictions.csv"
+    result = pd.DataFrame(scores)
+    result.to_csv(score_path, index=False)
+    if predictions:
+        pd.concat(predictions, ignore_index=True).to_csv(pred_path, index=False)
+    else:
+        pd.DataFrame(columns=["source_row", "y_true", "probability", IS_SYNTHETIC]).to_csv(
+            pred_path, index=False
+        )
+    return score_path, pred_path, result
+
+
+def run_training(request: TrainingRequest, run: RunDir, *, protocol_path=None, cv_gan_factory=None):
+    """Orchestrator callable, after the quality gate; see docs/training.md.
+
+    No accepted CTGAN sets means only original, cleaned and SMOTENC run.
+    The reference protocol's split seed stays fixed while config.seeds varies model randomness.
+    """
+    cfg = request.config
+    path = Path(
+        protocol_path
+        or cfg.training_protocol_path
+        or (ROOT / "results" / f"baseline_protocol_{cfg.dataset_name}_{cfg.split_seed}_cv3.json")
+    )
+    config, raw, cleaned, protocol = _inputs(request, run, path)
+    accepted = {}
+    train = cleaned["train"]
+    positives = int(train[config.target].sum())
+    for item in request.accepted_synthetic:
+        count = fill_rows(item.fill_level, positives, len(train) - positives)
+        if item.rows != count:
+            raise ValueError("Accepted synthetic row count differs from the configured fill level")
+        accepted[item.fill_level] = _synthetic(
+            pd.read_csv(run.root / item.path), train, config.target, count
+        )
+    folder = run.subdir("models").resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    saved_protocol = folder / "training_protocol.json"
+    saved_protocol.write_text(json.dumps(protocol, indent=2) + "\n")
+    records = []
+    with threadpool_limits(limits=2):
+        for seed in cfg.seeds:
+            for arm, level, tables, extra, error in _arm_sets(
+                config, raw, cleaned, cfg.fill_levels, accepted, seed
+            ):
+                group = [
+                    _fit_record(
+                        arm,
+                        level,
+                        tables,
+                        extra,
+                        error,
+                        name,
+                        estimator,
+                        seed,
+                        config,
+                        protocol,
+                        folder,
+                    )
+                    for name, estimator in baselines.build_models(seed).items()
+                ]
+                successful = [r for r in group if r.status is Status.SUCCESS]
+                if successful:
+                    winner = max(successful, key=lambda r: r.val_metrics["pr_auc"])
+                    group = [r.updated(selected=r.model == winner.model) for r in group]
+                records.extend(group)
+                log_decision(
+                    "training",
+                    "fit_arm",
+                    {
+                        "arm": arm.value,
+                        "fill_level": level,
+                        "seed": seed,
+                        "protocol_id": protocol["protocol_id"],
+                    },
+                    "FAILED" if any(r.status is Status.FAILED for r in group) else "SUCCESS",
+                    "Frozen suite and thresholds; selection uses real validation PR-AUC",
+                    run=run,
+                )
+        cv_paths, cv_result = (None, None), None
+        if cfg.training_cv_folds:
+            cv_metrics, cv_predictions, cv_result = _repeated_cv(
+                request, config, raw, protocol, folder, cv_gan_factory
+            )
+            cv_paths = (cv_metrics, cv_predictions)
+    metric_path, summary_path = _save_metrics(records, cfg.dataset_name, folder)
+    failures = sum(r.status is Status.FAILED for r in records)
+    if cv_result is not None:
+        failures += int(cv_result.status.eq(Status.FAILED.value).sum())
+    notices = []
+    if cfg.training_cv_folds and request.accepted_synthetic and cv_gan_factory is None:
+        notices.append("CTGAN repeated CV skipped: no fold-fitted, quality-checked cv_gan_factory")
+    return TrainingOutput(
+        status=Status.FAILED if failures else Status.SUCCESS,
+        reason=f"{failures} model fits failed; inspect records/CV metrics" if failures else None,
+        warnings=notices,
+        records=records,
+        metrics_path=metric_path,
+        validation_summary_path=summary_path,
+        protocol_path=saved_protocol,
+        cv_metrics_path=cv_paths[0],
+        cv_predictions_path=cv_paths[1],
+    )
 
 
 def run_training_arms(

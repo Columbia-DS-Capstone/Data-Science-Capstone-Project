@@ -143,7 +143,12 @@ per-run JSON files retain diagnostics, model settings, source/split hashes, and 
 Defaults remain seed 42 and three-fold training CV; CV reports threshold-independent
 PR-AUC and ROC-AUC. Matching dataset/arm/seed/CV rows are replaced on rerun.
 
-The Training Agent consumes the frozen protocol:
+The file-based Training Agent is `agents.training.run_training(request, run)`. It runs the
+frozen suite on original, cleaned, SMOTENC, and quality-accepted CTGAN arms, saves models and
+predictions, and returns `TrainingOutput`. See [docs/training.md](docs/training.md) for its
+input contract, validation-only summaries, and optional repeated CV.
+
+The lower-level in-memory helper also consumes the frozen protocol:
 
 ```python
 from agentic_gan.agents.training import run_training_arms

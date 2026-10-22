@@ -398,10 +398,12 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 
 **Inputs.** `TrainingRequest`: the config, the `raw` and `baseline` file sets, and the accepted synthetic sets (the fill levels that passed the gate). No accepted sets means the `gan` arm is not run.
 
+**Implemented interface.** `agents.training.run_training(request, run)` now returns this handoff, saves models/predictions and metrics, and is wired into the graph. Inputs are unencoded tables with `source_row` IDs. See [the Training Agent guide](training.md) for configuration, artifact formats, and repeated CV. Other unfinished pipeline stages still need real implementations in place of their stubs.
+
 **Responsibilities.**
 
 1. Build the training set for each arm: `raw`; `baseline`; `smote` (the `baseline` training split plus SMOTENC rows at each fill level in the config grid, resampled inside this agent); and `gan` (the `baseline` training split plus the accepted synthetic set at each accepted fill level).
-2. For the Sprint 2 baseline freeze, every arm uses gradient boosting, LightGBM, CatBoost, stacking, and a neural net from `tools/baselines.py`. Load the dataset/seed protocol from `results/baseline_protocol_*.json` and reuse its original-validation F1 thresholds; see `docs/notes/baselines.md`.
+2. For the Sprint 2 baseline freeze, every arm uses gradient boosting, LightGBM, CatBoost, stacking, and a neural net from `tools/baselines.py`. Load the dataset/split-seed protocol from `results/baseline_protocol_*.json` and reuse its original-validation F1 thresholds across arms, fill levels and model seeds; see `docs/notes/baselines.md`. Model seeds vary fitting randomness without resplitting the data.
 3. Future tuning uses the same search budget per arm and real validation only. The Sprint 2 freeze performs no search: all hyperparameters and original-validation thresholds stay fixed.
 4. Repeat for each seed in the config (default 5) so results carry a spread.
 5. Probability calibration is a future option. It is disabled for the Sprint 2 freeze; adding it changes the probability scale and requires a separate threshold protocol.
