@@ -1,12 +1,20 @@
 # Agentic GAN Framework: System Architecture
 
-Team 23, Columbia Data Science Capstone with TD Bank. Draft v0.1 for the mentor meeting on 2 October 2026. Tracks GitHub issue #4.
+Team 23, Columbia Data Science Capstone with TD Bank. Draft v0.2 for the mentor meeting on 16 October 2026. Tracks GitHub issues #4 and #23.
 
-The sections that define the contracts between agents (1, 3, 4, 5, 7, 8 and 9) were updated on 14 October 2026 to match the code in `src/agentic_gan/schemas.py` and `src/agentic_gan/orchestrator/`. The rest of the document is revised in issue #23. Paragraphs headed **Implementer notes** list what to keep in mind when building each part.
+v0.2 adds the mentor feedback of 9 October and matches the code merged so far. The main changes from v0.1:
+
+- Four comparison arms (`raw`, `baseline`, `smote`, `gan`) instead of three (section 1).
+- Synthetic volume is a fill level, a share of the class gap, chosen by a volume loop (section 4.1).
+- Every agent has a table of the questions it answers and what it returns.
+- The typed handoffs in section 7 are the real classes in `src/agentic_gan/schemas.py`.
+- A dataset table, the framework decision and the Credit Card Fraud findings.
+
+Paragraphs headed **Implementer notes** list what to keep in mind when building each part.
 
 ## 1. Purpose and scope
 
-This document defines the agents in the system, what each one is responsible for, what it takes in and puts out, and how the orchestrator moves a run from raw data to a final report. It is the blueprint the team builds from. It does not choose a framework (issue #13) and does not contain implementation code.
+This document defines the agents in the system, what each one is responsible for, what it takes in and puts out, and how the orchestrator moves a run from raw data to a final report. It is the blueprint the team builds from. The framework is LangGraph (section 11). The document does not contain implementation code.
 
 The system answers one question: does GAN-generated data improve a downstream model, and can an automated pipeline decide that reliably and document the decision? To answer it, every run compares four data pipelines, called arms, on the same held-out real test set. Arms are named rather than lettered, because in v0.1 the letters meant different things.
 
@@ -20,6 +28,24 @@ The system answers one question: does GAN-generated data improve a downstream mo
 **Why a raw arm.** Data repair is part of the project, and without a no-repair control nothing can be credited to the Pre-processing Agent. `smote` and `gan` are built on `baseline`, so any lift from augmentation is not repair in disguise. The gap between `raw` and `baseline` should be visible where there is something to repair (Polish Bankruptcy, and the placeholders and sentinel in Bank Marketing) and small where there is not (Default of Credit Card and Credit Card Fraud have no missing values).
 
 **Fill level.** The amount of augmentation is a fill level: the share of the training class gap that is filled with extra positive rows. The class gap is the number of negatives minus the number of positives in the training split, so a fill level of 1.0 balances the classes. The default grid is 0.10, 0.25, 0.50, 0.75 and 1.00. It is set per dataset in the config because class gaps differ widely (about 20,800 rows at 1.0 for Bank Marketing, about 170,000 for Credit Card Fraud). A fill level of 0 is `baseline` itself. `smote` uses the same grid as `gan`, so the two add the same number of rows at each level. The rule is `fill_rows` in `schemas.py`: `round(fill_level * (negatives - positives))`.
+
+**Files and encoding.** The arms are pipelines. The files the Pre-processing Agent writes hold the cleaned tables before encoding, because the GAN reads categorical columns as they are. The fitted transformer encodes and scales those tables for the models, and for synthetic rows, using treatments fitted on the real training rows only.
+
+### Datasets
+
+The four datasets in scope. Numbers come from the EDA and the 9 October slides, and were checked against the data where it is available locally.
+
+| Dataset | Rows | Positives | Train positives | Rows added at fill 1.0 | Missing values | Exact duplicate rows |
+|---|---|---|---|---|---|---|
+| Default of Credit Card Clients (UCI 350) | 30,000 | 6,636 (22.1%) | 3,982 | 10,036 | none | 35 |
+| Bank Marketing (UCI 222) | 45,211 | 5,289 (11.7%) | 3,173 | 20,780 | 52,124 cells (`unknown` in four columns), plus the `pdays = -1` sentinel | 0 |
+| Polish Bankruptcy (UCI 365) | 43,405 | 2,091 (4.8%) | 1,255 | 23,533 | 1.5% of cells, 54% of rows have a gap, worst column A37 (43.7%) | 401 |
+| Credit Card Fraud (ULB) | 284,807 | 492 (0.17%) | 295 (284 after dropping duplicates) | 170,294 (169,667 after) | none | 1,081 |
+
+- All four use a stratified 60/20/20 split with seed 42. For Credit Card Fraud the recommendation is to drop exact duplicate rows first (`docs/fraud_dataset_recommendation.md`).
+- Bank Marketing is the primary dataset. Default of Credit Card is the cleanest place to test generated data, since it has no missing values. Polish Bankruptcy tests the data-repair step. Credit Card Fraud has too few positives to expect a gain and is the stress case. A second fraud dataset, IEEE-CIS, is proposed (question 10 in section 12) and not yet in scope.
+- Polish Bankruptcy pools five forecasting-horizon cohorts and has no company identifier. Its missingness is informative: column A27 is missing in 34.5% of bankrupt training rows and 4.9% of the others.
+- Default of Credit Card stores six monthly payment columns per client, which makes it the TimeGAN candidate (section 12, question 4).
 
 ## 2. Design principles
 
@@ -35,29 +61,27 @@ The system answers one question: does GAN-generated data improve a downstream mo
 
 ```mermaid
 flowchart TD
-    CFG[Run config + dataset path] --> ORC
+    CFG[Run config + dataset path] --> S0
 
-    subgraph ORC[Orchestrator Agent]
-        S0[S0 Ingest, validate schema, split train/val/test]
+    subgraph ORC[Orchestrator: state, retries, decision log, manifest]
+        S0[S0 Validate schema,<br/>split train/val/test]
+        VOL[Volume rule<br/>smallest fill level with a reliable gain, else none]
     end
 
-    S0 --> PRE[Pre-processing Agent<br/>profile, clean, visualise]
-    PRE --> SEL[Model Selection Agent<br/>choose GAN, train, generate]
-    SEL --> QE{Synthetic Data Quality<br/>Evaluation Agent<br/>gate}
-    QE -- fail, attempts left --> SEL
-    QE -- fail, attempts exhausted --> TRN
-    QE -- pass --> TRN[Model Training Agent<br/>raw, baseline, SMOTE, GAN]
-    TRN --> EVA[Evaluation Agent<br/>metrics, SHAP, segments, report]
+    S0 --> PRE[Pre-processing Agent<br/>profile, clean<br/>raw and baseline files]
+    PRE --> SEL[Model Selection Agent<br/>choose GAN, train,<br/>generate per fill level]
+    SEL --> QE{Quality Evaluation Agent<br/>gate per fill level}
+    QE -- FAIL, attempts left --> SEL
+    QE -- FAIL, attempts exhausted: no GAN arm --> TRN
+    QE -- PASS: passing fill levels --> TRN[Model Training Agent<br/>raw, baseline, SMOTE, GAN]
+    TRN --> VOL
+    VOL --> EVA[Evaluation Agent<br/>metrics, SHAP, segments, report]
     EVA --> OUT[Run folder: report, logs, artifacts]
-
-    ORC -. state, retries, decision log .- PRE
-    ORC -. state, retries, decision log .- SEL
-    ORC -. state, retries, decision log .- QE
-    ORC -. state, retries, decision log .- TRN
-    ORC -. state, retries, decision log .- EVA
 ```
 
-The orchestrator owns control flow and state. Sub-agents do not call each other. They return results to the orchestrator, which decides the next step. This keeps retries, logging and failure handling in one place.
+![System overview](architecture_diagram.png)
+
+The orchestrator owns control flow and state. Sub-agents do not call each other. They return results to the orchestrator, which decides the next step. This keeps retries, logging and failure handling in one place. The picture above is a static copy of the diagram for slides.
 
 ### Shared state
 
@@ -94,6 +118,18 @@ The code is in `src/agentic_gan/orchestrator/`: `create_run` makes the folder, `
 
 **Purpose.** Run the pipeline end to end, enforce the rules in section 2, and keep the audit trail.
 
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| Can this dataset be used as configured? | `validate_schema`: columns, target, positive class, class sizes | `SchemaError`, or the validated data |
+| Which rows go in train, validation and test? | `split_data`: two stratified steps with a fixed seed | `SplitOutput` |
+| Is each agent's output valid? | Check against the output type in `STAGE_IO`. Listed files must exist inside the run folder | Registered artifacts, or a stage error |
+| Do we retry or stop? | `max_stage_retries` for errors, `max_attempts` for the quality gate | `RunState` (`RETRY`, `FAILED`) and a decision-log line |
+| Does the GAN arm run? | The quality verdict after the last attempt | `gan_available`, with a reason when false |
+| How much synthetic data do we add? | The volume loop (section 4.1) | `volume_decision` |
+| Did the run finish cleanly? | A complete `RunState` and a clean `Manifest.verify()` | `state.json`, `manifest.json`, or a partial report |
+
 **Inputs.** `RunConfig`: dataset path and name, target column, positive class (quoted in YAML, because an unquoted `yes` is read as a boolean and rejected), split ratios and seed, model seeds, excluded features, the fill-level grid, quality-gate thresholds, sanity rules, `max_attempts` (quality-gate attempts), `max_stage_retries`, GAN search bounds, candidate models, `min_rows` and whether to calibrate.
 
 **Responsibilities.**
@@ -127,11 +163,68 @@ The code is in `src/agentic_gan/orchestrator/`: `create_run` makes the folder, `
 - Register an output in the manifest right after it passes validation, under the stage that produced it, and save the manifest.
 - In the graph, keep `RunState` as one key of the graph state and have each node return a new `RunState` (LangGraph, issue #25).
 
+### 4.1 The volume loop: how much synthetic data to add
+
+The benefit of augmentation varies across datasets, so the amount is decided per dataset, from evidence, and adding nothing is always a candidate. The loop is the orchestrator's logic. It comes from the 9 October discussion with the mentors.
+
+**What guides the decision.**
+
+| Input | How it guides the decision | Where it comes from |
+|---|---|---|
+| Class imbalance | Use the class counts to test partial and full balancing, and include zero synthetic rows as a candidate | `baseline_train_positives`, `baseline_train_negatives`, and the fill-level grid in the config |
+| Preprocessing findings | Missingness, rare groups and class overlap show how hard the data is to generate and how much repair matters | `profile.json` |
+| Validation feedback | Quality checks, including the discriminator check, flag poor synthetic data. Real validation performance selects the volume | `QualityReport`, and the validation predictions in `TrainingOutput` |
+
+**The loop.**
+
+```mermaid
+flowchart LR
+    A[Profile training data<br/>real-only baseline] --> B[Choose volumes<br/>generate samples]
+    B --> C{Quality passes?}
+    C -- no, within budget --> D[Reject batch<br/>revise generator]
+    D --> B
+    C -- no, budget exhausted --> Z[Use real data only<br/>add 0 rows]
+    C -- yes --> E[Test accepted volumes<br/>on real validation data]
+    E --> F{Reliable gain?}
+    F -- yes --> G[Select smallest volume<br/>near the best score]
+    F -- no --> Z
+```
+
+![The volume loop](volume_loop_diagram.png)
+
+1. Profile the training data and set the real-only baseline (Pre-processing Agent). The `baseline` arm is fill level 0.
+2. Choose the volumes and generate. The volumes are the fill levels in the config, set per dataset (default 0.10, 0.25, 0.50, 0.75 and 1.00). The Model Selection Agent generates one set per level.
+3. Quality check each set. A level that passes goes on. If no level passes, reject the batch, revise the generator and retry within the budget (`max_attempts`). If the budget is exhausted, use real data only and add 0 rows.
+4. Test the accepted volumes on real validation data. The Training Agent fits `gan`, and `smote` as the comparison, at every accepted level and for every seed.
+5. Ask whether the gain is reliable. If it is, select the smallest volume near the best score. If not, use real data only and add 0 rows.
+6. Record the choice as `volume_decision`, with the reason, and write it to the decision log.
+
+**The rule for step 5 (proposed, to be finalised in issue #36).**
+
+- Compare on validation PR-AUC, the selection metric the baseline runs use. Test data is not used.
+- The gain of a level is its mean validation PR-AUC over seeds minus that of `baseline`.
+- A gain is reliable if it is larger than the seed-to-seed spread (one standard deviation of `baseline` over seeds) and positive for most seeds.
+- Choose the smallest level whose mean is within one spread of the best reliable level. If no level is reliable, `volume_decision` is 0.0 with the reason "no reliable gain".
+- The seed spread measures training randomness, not the noise from a small validation set. For datasets with few validation positives (Credit Card Fraud has about 94 after dropping duplicates), also bootstrap the validation rows and require the gain to hold there.
+
+**Where it runs.** The orchestrator calls `choose_volume` (`tools/volume.py`, issue #36, if time permits) after training and before evaluation. Until that tool exists, `volume_decision` stays unset and the report says the volume rule did not run. Training evaluates every accepted level in one pass instead of adding volume step by step. That costs more compute but is simpler and reproducible, which is why the Credit Card Fraud grid is reduced (`docs/fraud_dataset_recommendation.md`).
+
 ## 5. Sub-agents
 
 ### 5.1 Pre-processing Agent (issue #6)
 
 **Purpose.** Produce a profiled, cleaned version of the real data and document every treatment.
+
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| How much is missing, and where? | Profile: missing share per column, and sentinel values such as `unknown` and `-1` | `profile.json` |
+| Is a placeholder informative? | Compare the target rate of rows with the placeholder against the rest, and the share of rows affected (rule table below) | A treatment-log row per column |
+| Which fix does each column get, and why? | The treatment rule table | The treatment log and the `baseline` files |
+| Do duplicates, rare groups or class overlap threaten the data? | Profile: exact duplicates (the whole raw row), rare categories, class overlap | `profile.json` and warnings |
+| How imbalanced is the training split? | Class counts of the `baseline` training file | `baseline_train_positives`, `baseline_train_negatives` |
+| Was everything fitted on training rows only? | The number of rows used to fit the transformer | `transformer_fit_rows` |
 
 **Inputs.** `PreprocessInput`: the `SplitOutput` (train, validation and test files from S0) and the config. The profile and the fitted treatments come from the training split only. Validation and test are transformed with the training-fitted treatments.
 
@@ -169,10 +262,25 @@ The code is in `src/agentic_gan/orchestrator/`: `create_run` makes the folder, `
 - Fit every transformer on the training split only, for each arm separately. Record the number of training rows used in `transformer_fit_rows`. It must equal the number of rows in that arm's training file.
 - Count the positives and negatives in the `baseline` training file after any duplicate rows were dropped, and return them as `baseline_train_positives` and `baseline_train_negatives`. Fill levels are computed from these counts, not from the counts in `SplitOutput`, which describe the split before cleaning.
 - Return `SUCCESS` only when every required field is present. Otherwise return `FAILED` with a reason.
+- The shared preprocessing script (`tools/preprocessing.py`, settings in `utils/datasets.json`, notes in `docs/preprocessing.md`) already writes cleaned, unencoded `train`, `validation` and `test` tables to `data/interim/<dataset>/`. The agent calls its functions as tools. The tables carry a `source_row` column, which models and the GAN must not use as a feature.
+- That script recreates the split from the dataset settings instead of reading the `SplitOutput` files. Both use the same two-step stratified recipe today. Keep the recipe identical until there is a single implementation.
+- Encoding and scaling are fitted inside each cross-validation fold by the training tools (`docs/notes/baselines.md`). `transformer_path` should hold the `baseline` transformer that is reused on synthetic rows. A separate transformer for the `raw` arm is not in the schema yet.
+- Polish Bankruptcy is where repair should matter, because its missingness is informative (section 1). Of the treatment rules, the missing-indicator flag is the first to try there. A column that is 5% or more missing gets it under the rule table, and A27 is 6.4% missing.
+- Exact duplicates are whole raw rows, `Time` included for Credit Card Fraud. Deduplicating after a column has been dropped would delete legitimate repeated transactions. If duplicates are dropped before the split, that happens in the split step (`docs/fraud_dataset_recommendation.md`).
 
 ### 5.2 Model Selection Agent (issue #7)
 
 **Purpose.** Choose the right generator for the data, train it, and produce synthetic records.
+
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| Which generator fits this data, and why? | The selection rules below: column-type mix, row count, entity and time structure | `generator` and `rationale` |
+| Is there enough data to generate at all? | `min_rows` and the structure checks | `SKIPPED` with a reason |
+| How many rows at each fill level? | `fill_rows(level, positives, negatives)` | One `SyntheticSet` per fill level |
+| Which settings on a retry? | The failing checks in `previous_report`, inside `gan_bounds` | `hyperparameters` |
+| Did training behave? | The loss history: finite and not collapsed | `loss_history_path`. A collapse counts as a failed attempt |
 
 **Inputs.** `ModelSelectionInput`: the config, the `PreprocessOutput` (the `baseline` training split and `profile.json` are the data to use), the quality-gate attempt number (from 1) and, on a retry, the `QualityReport` that failed.
 
@@ -211,10 +319,24 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 - Return one `SyntheticSet` per fill level. Two sets at one level are rejected.
 - On a retry, `previous_report` is a `FAIL` report. Read its failing checks and keep new hyperparameters inside the config's `gan_bounds`. The schema rejects a retry without a report, a first attempt with one, and an attempt above `max_attempts`.
 - Log the selection rationale, and any hyperparameter proposal, with `log_decision`.
+- The CTGAN tool (issue #32) takes the cleaned, unencoded training table and cannot handle missing numeric values. The `baseline` files have none. Its row counts at each fill level should match `fill_rows`: for Bank Marketing, 2,078, 5,195 and 10,390 rows at 0.10, 0.25 and 0.50. Use `fill_rows` rather than a second copy of the formula.
 
 ### 5.3 Synthetic Data Quality Evaluation Agent (issue #8)
 
 **Purpose.** Decide whether the synthetic data is good enough to train on, and say why. This agent is the gate.
+
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| Is the synthetic data realistic? | Fidelity checks against the real training split | A `CheckResult` per check |
+| Is it diverse, or has the generator collapsed? | Diversity check (reported only for now) | A `CheckResult` with `hard = false` |
+| Is it novel and not copied? | Distance to closest record and the exact-duplicate count | A `CheckResult` |
+| Is it valid? | The sanity rules in the config | A `CheckResult` |
+| Is it useful? | TSTR against TRTR on real validation data | A `CheckResult` |
+| Can a classifier tell it from real data? | Discriminator feedback (reported only for now) | A `CheckResult` with `hard = false` |
+| Does it match the requested volume? | Achieved fill level against requested | A `CheckResult` |
+| Pass or fail, and which fill levels pass? | The hard checks at each level | `verdict`, `levels`, `passing_levels` |
 
 **Inputs.** `QualityInput`: the config (thresholds in `quality_gate`, and the sanity rules), the `PreprocessOutput` (the real `baseline` training and validation files) and the `GeneratorOutput` (the synthetic files).
 
@@ -227,6 +349,8 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 | Utility | TSTR (train on synthetic, test on real) and TRTR (train on real, test on real), using the same classifier. Report the AUC and PR-AUC gap | Real validation split |
 | Privacy | Distance to closest record (synthetic to real training) against the same distance for real validation rows. Exact-duplicate count. | Real validation split |
 | Sanity | Category sets, value ranges, impossible combinations (rule list in config, e.g. `age >= 18`) | Schema |
+| Diversity | Coverage of the real categories and value ranges, spread of pairwise distances, near-constant output | Real training split |
+| Discriminator feedback | How well a classifier separates real from synthetic rows. Near chance is good | Real training split |
 | Label balance | Achieved fill level against the requested fill level | Request |
 
 **Gate logic (starting values, to be calibrated on the real data in EDA).**
@@ -236,12 +360,13 @@ For the primary dataset, the rules choose CTGAN. `bank-full` has no customer ide
 - TSTR AUC within 0.05 of TRTR AUC.
 - Median distance-to-closest-record for synthetic rows not smaller than for real validation rows, and zero exact duplicates of training rows.
 - Zero sanity violations after the config rule list.
+- Diversity and discriminator feedback are reported but do not gate (`hard = false`) until their thresholds are calibrated (issue #12). They still inform the retry. The 9 October discussion lists validity, diversity, duplication and discriminator feedback as the quality checks.
 
 The checks run on each synthetic set, that is, at each fill level. A level passes when all of its hard checks pass. The verdict is `PASS` if at least one level passes and `FAIL` if none does. On `FAIL`, the orchestrator retries the Model Selection Agent, which receives this report with its failing metrics.
 
 **Outputs.** `QualityReport`: the overall `verdict` (`PASS` or `FAIL`); one `LevelReport` per fill level, holding its checks (name, value, threshold, passed, hard) and whether the level passed; the path to `quality_report.json`; and plots (per-column real vs synthetic distributions, correlation heatmaps). `passing_levels` lists the levels that passed.
 
-**Tools.** `ks_test`, `js_divergence`, `wasserstein`, `correlation_diff`, `tstr_trtr`, `dcr_privacy`, `sanity_rules`, `plot_comparison`.
+**Tools.** `ks_test`, `js_divergence`, `wasserstein`, `correlation_diff`, `tstr_trtr`, `dcr_privacy`, `sanity_rules`, `diversity_checks`, `discriminator_check`, `plot_comparison`.
 
 **Decision logic.** Deterministic. The verdict is computed from the thresholds. The LLM only writes the prose summary of the report and never changes the verdict.
 
@@ -261,6 +386,16 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 
 **Purpose.** Train the same set of models on each arm under identical conditions.
 
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| Which model is best on each arm and fill level? | Tuned with an identical budget and selected on real validation data only | A `ModelRecord` with its hyperparameters |
+| What does each model predict on validation and test? | Predictions saved for every arm, fill level, model and seed | The prediction paths |
+| Can this model run on this arm? | Whether it accepts the arm's data (for example NaN on `raw`) | A `SKIPPED` record with a reason |
+| Is the evaluation data clean? | No synthetic or resampled row in validation or test | The success check |
+| How noisy are the results? | Every run repeated over the config's seeds | One record per seed |
+
 **Inputs.** `TrainingRequest`: the config, the `raw` and `baseline` file sets, and the accepted synthetic sets (the fill levels that passed the gate). No accepted sets means the `gan` arm is not run.
 
 **Responsibilities.**
@@ -273,6 +408,8 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 6. Save models and predictions on validation and test.
 
 **Raw arm and missing values (current choice, open for discussion).** `raw` keeps missing values, and some models reject NaN. Checked with scikit-learn 1.9.1: logistic regression and gradient boosting reject it, while decision tree, random forest and CatBoost accept it. XGBoost and LightGBM are documented to accept it. A model that rejects NaN is not fitted on `raw`. Its records are `SKIPPED` with the reason `model rejects NaN`, and `baseline` vs `raw` is compared on the models that ran on both. On Bank Marketing nothing needs to be skipped, because no NaN is left after encoding. Polish Bankruptcy has real missing values, so some models are skipped there. The alternative is a fixed minimal fill on `raw`, which runs every model but means `raw` is no longer untouched. To be settled with the team and the mentors.
+
+**Status in code.** The baseline runs (`tools/baselines.py`, `docs/notes/baselines.md`) currently implement the minimal-fill alternative. Their `original` arm applies minimum imputation, scaling and encoding, and all nine models run on it. In those results `original` is `raw` and `cleaned` is `baseline`. In the first single-seed runs the two arms are equal on Default of Credit Card and Polish Bankruptcy and differ by 0.014 test PR-AUC on Bank Marketing, because the shared cleaning is itself median imputation. The missing-indicator and model-based treatments from section 5.1 are not implemented yet, so a repair effect on Polish Bankruptcy is not expected until they are.
 
 **Outputs.** `TrainingOutput`: one `ModelRecord` for each arm, fill level (`smote` and `gan` only), model and seed, with the model path, the chosen hyperparameters, and the validation and test prediction paths. A model that was not fitted has a `SKIPPED` record with a reason.
 
@@ -289,11 +426,23 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 - `TrainingOutput` cannot be `SUCCESS` if any record is `FAILED`. Skipped records are fine.
 - Add SMOTE rows to the `baseline` training split only, with `fill_rows(level, positives, negatives)` using that file's class counts (the ones the `PreprocessOutput` reports), so `smote` and `gan` add the same number of rows at each level. Never resample validation or test.
 - Use the same search space, folds and budget for every arm, so that a difference between arms comes from the data and not from tuning. Select on the real validation split only.
-- The grid is large: by default 5 fill levels for each of 2 augmented arms, times models and seeds, before tuning. The Credit Card Fraud grid reaches about 170,000 synthetic rows. Plan the compute before running it.
+- The grid is large: by default 5 fill levels for each of 2 augmented arms, times models and seeds, before tuning. At the default grid, Credit Card Fraud reaches about 170,000 synthetic rows, so use the reduced Fraud grid (0.01 to 0.10) from `docs/fraud_dataset_recommendation.md`. Plan the compute before running it.
 
 ### 5.5 Evaluation Agent (issue #10)
 
 **Purpose.** Turn the predictions into a comparison across arms, explain the models, and produce the report.
+
+**Questions this agent answers.**
+
+| Question | How it is decided | Returned as |
+|---|---|---|
+| Did synthetic data help over `baseline` and over `smote`? | A paired test or interval across seeds, at matched fill levels | Comparison tables |
+| Did repair help? | `baseline` vs `raw`, on the models fitted in both, per dataset | Comparison tables |
+| How much synthetic data should we add? | Reads `volume_decision` and its reason from the state | A report section |
+| For whom did it help or hurt? | Segment analysis | Segment tables |
+| Why did the model change? | SHAP rankings across arms | SHAP plots |
+| Can the numbers be trusted? | Every number in the report checked against the result files | `numbers_verified` |
+| What failed or was inconclusive? | `gan_available`, skipped records, differences within noise | The required negative-results section |
 
 **Inputs.** `EvaluationInput`: the config, the `TrainingOutput`, the `QualityReport` (none if no generator ran), and the paths to the treatment log, decision log, manifest and `state.json`. The state file says whether the `gan` arm was available (and why not) and which fill level the volume rule chose, if it ran.
 
@@ -321,7 +470,7 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 - If `gan_available` is false, give the recorded reason and leave the `gan` arm out of the comparisons. A missing arm is not an error.
 - If `volume_decision` is set, report the fill level and its reason. If it is unset, say that the volume rule did not run.
 - Write the report and tables inside the run folder (`report/`) and list them in the output, so the manifest records them.
-- The Credit Card Fraud validation and test sets hold about 100 positives each, so one missed case moves recall by about a point. Say plainly when a difference is within noise.
+- The Credit Card Fraud validation and test sets hold about 95 positives each (94 and 95 after dropping duplicates), so one missed case moves recall by about a point and the 95% interval on recall is about 8 points either way. Say plainly when a difference is within noise.
 
 ## 6. Where the LLM is used
 
@@ -332,6 +481,7 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 | Model Selection | Hyperparameter proposals on retry, within bounds | Generator choice, training |
 | Quality Evaluation | Prose summary | Verdict |
 | Model Training | None | All |
+| Volume rule | None | The choice of fill level |
 | Evaluation | Report narrative | Metrics, comparisons, SHAP |
 
 This split is deliberate. It keeps the experiment reproducible, makes the agent decisions auditable, and limits the LLM to places where wording or a bounded search helps. It is also the answer to the mentor request to add deterministic rules and evaluation criteria (issue #12).
@@ -401,39 +551,62 @@ Rules that apply to every output:
 
 ## 10. Mapping to workstreams
 
-| Component | GitHub issue | Owners per meeting notes |
-|---|---|---|
-| Architecture map | #4 | Team |
-| Orchestrator | #5 | Haasita, Raghav |
-| Pre-processing | #6 | Akriti, Arshnoor, Haasita |
-| Model Selection | #7 | Akriti, all |
-| Quality Evaluation | #8 | Haasita, Raghav |
-| Model Training | #9 | Arshnoor, Kyle |
-| Evaluation and report | #10 | Arshnoor, Kyle |
-| Deterministic rules and eval criteria | #12 | Team (this document proposes starting values) |
-| Framework choice | #13 | Team |
+Status as of 15 October 2026. "Sprint 1 tasks" are the issues of the sprint that ends on 16 October.
 
-Issue #6 on GitHub currently lists only Akriti and #7 only Akriti. The table follows the meeting notes. The GitHub assignees should be updated to match.
+| Component | Issue | Owners | Sprint 1 tasks | Code |
+|---|---|---|---|---|
+| Architecture map | #4 | Team | #23 this document (Haasita) | `docs/` |
+| Orchestrator | #5 | Haasita, Raghav | #27 objects, state, manifest, split (Haasita). #28 graph, stubs, decision log (Raghav). #25 framework (Raghav) | `schemas.py`, `orchestrator/` |
+| Pre-processing | #6 | Akriti, Arshnoor, Haasita | #29 shared script (Arshnoor) | `tools/preprocessing.py`, `utils/datasets.json` |
+| Model Selection | #7 | Akriti, Kyle | #32 CTGAN code and a Bank run (Kyle). #33 generator rule (Akriti). #34 GAN survey (Akriti) | CTGAN tool and a Bank run merged (#32, PR #44) |
+| Quality Evaluation | #8 | Haasita, Raghav | None yet | None yet |
+| Model Training | #9 | Arshnoor, Kyle | #30 and #31 baselines (Arshnoor). #26 SMOTE (Raghav). #35 augmented comparison (Kyle). #36 volume rule (if time permits) | `tools/baselines.py`, `agents/training.py` |
+| Evaluation and report | #10 | Arshnoor, Kyle | None yet | None yet |
+| Deterministic rules and eval criteria | #12 | Team | This document proposes starting values | |
+| Framework | #25 | Raghav | Done: LangGraph | `docs/framework_decision.md` |
+| Credit Card Fraud dataset | #24 | Haasita | Recommendation and splits | `docs/fraud_dataset_recommendation.md`, `eda/fraud/` |
 
-## 11. Framework note
+## 11. Framework
 
-The design is a fixed graph of stages with one conditional loop (the quality gate). That maps naturally onto a graph-based orchestrator such as LangGraph (agents as nodes, `RunState` as shared state, the gate as a conditional edge, retry count in state). The OpenAI Agents SDK is also workable, using handoffs, though it is less natural for a deterministic pipeline with a fixed loop. Plain Python with Pydantic would work as well and has the fewest dependencies. Pydantic is needed in all cases for the typed handoffs. The agent specifications above do not depend on the choice.
+**Decision: LangGraph** (issue #25, `docs/framework_decision.md`). The design is a fixed graph of stages with one capped loop (the quality gate) and a separate one-retry rule for stage errors, and no model chooses the routing. LangGraph shows that loop as nodes and edges: a conditional edge reads the attempt count from the state. The OpenAI Agents SDK handles typed model output well, but it needs a hand-written loop around separate runs for this kind of deterministic routing. Its handoffs suit pipelines where a model picks the next specialist, which is not our case.
+
+What this means for the code:
+
+- `RunState` is one key of the graph state, and every node returns a new `RunState`.
+- Pydantic classes are the stage outputs. The orchestrator validates each one with `STAGE_IO`.
+- `log_decision` is our own audit log with the full schema (agent, rule, inputs, outcome, rationale). It is separate from any framework tracing.
+- Durable checkpoints are added only if a run must resume across processes.
+- Revisit the choice if most future control flow becomes model-selected handoffs.
 
 ## 12. Open questions for the mentors
 
-1. The meeting notes list DCGAN for non-time-series data. DCGAN is designed for images. For tabular data the candidates are CTGAN, TableGAN and WGAN-GP. Should we exclude DCGAN, or is an image dataset in scope?
-2. `bank-full` has few true missing values (mostly `unknown` placeholders). To test the "data repair" part of the project title, may we inject controlled missingness (MCAR and MAR at 5%, 15%, 30%) into the real data and measure how well each repair method and the GAN recover it? Otherwise `baseline` differs little from `raw`.
-3. Should `duration` be excluded from modelling? The UCI documentation says it is not known before a call and makes a model unrealistic. We propose excluding it and reporting a with-duration run as a sensitivity check.
-4. Which second dataset should carry the TimeGAN extension? We need an entity key and a time index. It would be useful to hear whether TD has a public dataset in mind. (Issue #3.)
-5. Answered by the mentor feedback of 9 October: SMOTE is an arm (`smote`) and the GAN has to beat it.
-6. Quality-gate thresholds are our starting values. Are there fidelity or utility thresholds TD uses that we should adopt instead?
-7. Does the Model Selection Agent also own GAN training, as in the meeting notes, or should GAN training be a separate agent?
-8. Compute: is the $100 per person in Google Cloud credit sufficient for CTGAN across seeds and fill levels, or should we plan for a smaller grid?
+| # | Question | Status |
+|---|---|---|
+| 1 | The meeting notes list DCGAN for non-time-series data. DCGAN is designed for images. For tabular data the candidates are CTGAN, TableGAN and WGAN-GP. Should we exclude DCGAN, or is an image dataset in scope? | Working assumption: excluded. The 9 October slides compare GAN, CGAN, GAIN, CTGAN and TimeGAN |
+| 2 | Bank Marketing has few true missing values (mostly `unknown` placeholders). To test the "data repair" part of the project title, may we inject controlled missingness (MCAR and MAR at 5%, 15%, 30%) and measure how well each repair method and the GAN recover it? | Partly answered. Polish Bankruptcy has real, informative missingness and is the repair testbed. Open for Bank Marketing |
+| 3 | Should `duration` be excluded from modelling? The UCI documentation says it is not known before a call. | Working assumption: excluded by default (`include_duration: false`), with a with-duration run as a sensitivity check |
+| 4 | Which second dataset should carry the TimeGAN extension? It needs an entity key and a time index. | Open. Default of Credit Card Clients (six monthly payment columns per client) is the candidate named in the 9 October slides |
+| 5 | Is a SMOTE arm acceptable as a baseline against the GAN? | Answered by the 9 October feedback: SMOTE is an arm (`smote`) |
+| 6 | Quality-gate thresholds are our starting values. Does TD use thresholds we should adopt? | Open |
+| 7 | Does the Model Selection Agent also own GAN training, or should GAN training be a separate agent? | Working assumption: Model Selection owns it (section 5.2) |
+| 8 | Is the $100 per person in Google Cloud credit enough for CTGAN across seeds and fill levels? | Open. The reduced Fraud grid and a per-dataset grid cut the cost |
+| 9 | Credit Card Fraud has 284 training positives after dropping duplicates. Is it acceptable as the stress case, with a no-gain result reported as a result? | New. See `docs/fraud_dataset_recommendation.md` |
+| 10 | Do the mentors agree to IEEE-CIS (20,663 fraud rows, real) as the second fraud dataset? Its Kaggle terms allow non-commercial use including academic research and education, and forbid redistribution. Does TD need to confirm that a sponsored capstone qualifies? | New. Measured and proposed in `docs/fraud_dataset_recommendation.md`. Not started |
+| 11 | Should the split by time be reported for Credit Card Fraud as a sensitivity check? | New |
+| 12 | Should the `raw` arm keep missing values (and skip models that reject NaN), or get a minimal fill so every model runs? | New. The baseline runs currently use the minimal fill (section 5.4) |
+| 13 | Diversity and discriminator-feedback checks are reported only until calibrated. Is that acceptable for the first gate? | New |
 
 ## 13. Next steps
 
-1. Review this document in the 2 October meeting and settle the open questions.
-2. Finalise the agent specifications and the schemas module (issue #11).
-3. Agree the framework (issue #13).
-4. Calibrate the quality-gate thresholds and treatment rules against the EDA results (issues #2, #12).
-5. Implement the pipeline end to end with stub agents first, then replace the stubs one at a time.
+Done: the agent specifications (this document), the schemas module, run state, manifest and split step (#27), and the framework choice (#25). The shared preprocessing script and the baselines for three datasets are in (#29, #30, #31), and so is the CTGAN tool with a Bank run (#32).
+
+Next:
+
+1. Settle the open questions in section 12 at the mentor meeting on 16 October, starting with the raw arm, the Credit Card Fraud dataset and the split by time.
+2. Finish the stub pipeline (#28) and wire the real split step in as its first stage. Then replace the stubs one at a time.
+3. Turn the shared preprocessing script into the Pre-processing Agent (#6): add the missing-indicator and model-based treatments, the duplicate rule, the second transformer for `raw`, and the `PreprocessOutput`.
+4. Build the Model Selection Agent (#7) around the CTGAN tool (#32) and the generator rule (#33).
+5. Build the Quality Evaluation Agent (#8) with the checks in section 5.3, and calibrate the thresholds on Bank Marketing (#12).
+6. Build the Training and Evaluation Agents (#9, #10): the arm runs, SMOTE (#26), the augmented comparison (#35), the volume rule (#36) and the report.
+
+Milestones from the 9 October slides: mentor meetings on 16 October, 30 October, 13 November and 11 December. Topic presentation 19 October, midterm report 8 November, poster session 14 December, final report 20 December.
