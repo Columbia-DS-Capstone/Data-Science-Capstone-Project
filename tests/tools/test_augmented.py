@@ -1,7 +1,13 @@
 import pandas as pd
 import pytest
 
-from agentic_gan.tools.augmented import check_holdouts, load_cleaned, run_experiment, summarize
+from agentic_gan.tools.augmented import (
+    check_holdouts,
+    load_cleaned,
+    plot_summary,
+    run_experiment,
+    summarize,
+)
 from agentic_gan.utils.datasets import DATASETS
 from agentic_gan.utils.synthetic import fill_counts
 
@@ -40,3 +46,14 @@ def test_smotenc_experiment_end_to_end(tables):
     assert list(out[out.arm == "smotenc"].n_synthetic.unique()) == [expected]
     summary = summarize(out)
     assert {"val_pr_auc_mean", "test_f1_std"} <= set(summary.columns)
+
+
+def test_plot_summary_writes_png(tmp_path):
+    rows = []
+    for arm, fills in (("real_only", [0.0]), ("smotenc", [0.1, 0.25, 0.5])):
+        for fill in fills:
+            rows.append({"arm": arm, "fill_level": fill, "test_pr_auc_mean": 0.45 - fill / 10,
+                         "test_pr_auc_std": 0.01, "test_f1_mean": 0.4, "test_f1_std": 0.01})
+    out = tmp_path / "plot.png"
+    plot_summary(pd.DataFrame(rows), out, {"test_pr_auc": 0.49, "test_f1": 0.36})
+    assert out.stat().st_size > 0

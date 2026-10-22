@@ -35,6 +35,9 @@ RESULT_COLUMNS = [
 ]
 KEYS = ["dataset", "arm", "fill_level", "seed"]
 DEFAULT_OUT = ROOT / "results" / "augmented_bank_marketing.csv"
+BASELINES_FILE = ROOT / "results" / "baselines.csv"
+# Colorblind-safe (Okabe-Ito): one hue per arm, fixed order.
+ARM_COLORS = {"smotenc": "#0072B2", "ctgan_v1": "#E69F00", "ctgan_v2": "#009E73"}
 
 
 def load_cleaned(config: DatasetConfig, root: Path = ROOT) -> dict[str, pd.DataFrame]:
@@ -153,6 +156,57 @@ def summarize(table: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def noor_baseline(dataset: str, path: Path = BASELINES_FILE) -> dict | None:
+    """Noor's seed-42 test PR-AUC and F1 for the validation winner of the cleaned arm."""
+    if not Path(path).exists():
+        return None
+    table = pd.read_csv(path)
+    row = table[(table.dataset == dataset) & (table.arm == "cleaned") & table.selected]
+    if row.empty:
+        return None
+    return {"test_pr_auc": float(row.test_pr_auc.iloc[0]), "test_f1": float(row.test_f1.iloc[0])}
+
+
+def plot_summary(summary: pd.DataFrame, path: Path, baseline: dict | None = None) -> None:
+    """Test PR-AUC and F1 against fill level; each arm starts from the real-only point."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    real = summary[summary.arm == REAL_ONLY].iloc[0]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+    panels = [("test_pr_auc", "Test PR-AUC (higher is better)"),
+              ("test_f1", "Test F1 at threshold 0.5")]
+    for ax, (metric, title) in zip(axes, panels, strict=True):
+        for arm in [a for a in summary.arm.unique() if a != REAL_ONLY]:
+            rows = summary[summary.arm == arm].sort_values("fill_level")
+            x = [0.0, *(rows.fill_level * 100)]
+            y = [real[f"{metric}_mean"], *rows[f"{metric}_mean"]]
+            err = [real[f"{metric}_std"], *rows[f"{metric}_std"]]
+            ax.errorbar(x, y, yerr=err, marker="o", lw=1.8, capsize=3, label=arm,
+                        color=ARM_COLORS.get(arm))
+        if baseline is not None:
+            ax.axhline(baseline[metric], color="#555555", ls=":", lw=1.2,
+                       label="Noor baseline (seed 42)")
+        ax.set_xticks([0, 10, 25, 50])
+        ax.set_xlabel("Fill level (% of class gap added as synthetic subscribers)")
+        ax.set_title(title, fontsize=11)
+        ax.grid(axis="y", color="#d0d0d0", lw=0.5)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    axes[0].legend(frameon=False, fontsize=9)
+    fig.suptitle("Bank Marketing: real-only (0%) vs real + synthetic rows; mean ± SD over seeds",
+                 fontsize=11)
+    note = "F1 at 0.5 rises partly because extra positives shift the model's probabilities."
+    fig.text(0.99, 0.005, note, ha="right", fontsize=8, color="#555555")
+    fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="bank_marketing")
@@ -177,7 +231,10 @@ def main() -> None:
         seeds=args.seeds, model_names=args.models, include_real_only=not args.no_real_only,
     )
     save_results(table, args.out)
-    print(summarize(table).round(4).to_string(index=False))
+    combined = pd.read_csv(args.out)
+    summary = summarize(combined)
+    print(summary.round(4).to_string(index=False))
+    plot_summary(summary, args.out.with_suffix(".png"), noor_baseline(config.name))
 
 
 if __name__ == "__main__":
