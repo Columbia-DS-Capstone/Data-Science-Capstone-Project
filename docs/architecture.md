@@ -401,15 +401,15 @@ The checks run on each synthetic set, that is, at each fill level. A level passe
 **Responsibilities.**
 
 1. Build the training set for each arm: `raw`; `baseline`; `smote` (the `baseline` training split plus SMOTENC rows at each fill level in the config grid, resampled inside this agent); and `gan` (the `baseline` training split plus the accepted synthetic set at each accepted fill level).
-2. For each arm, train logistic regression, random forest, gradient boosting, XGBoost and LightGBM. Neural nets are optional.
-3. Tune with the same search budget per arm, selecting on the real validation split only.
+2. For the Sprint 2 baseline freeze, every arm uses gradient boosting, LightGBM, CatBoost, stacking, and a neural net from `tools/baselines.py`. Load the dataset/seed protocol from `results/baseline_protocol_*.json` and reuse its original-validation F1 thresholds; see `docs/notes/baselines.md`.
+3. Future tuning uses the same search budget per arm and real validation only. The Sprint 2 freeze performs no search: all hyperparameters and original-validation thresholds stay fixed.
 4. Repeat for each seed in the config (default 5) so results carry a spread.
-5. Fit probability calibration on validation if the config requests it.
+5. Probability calibration is a future option. It is disabled for the Sprint 2 freeze; adding it changes the probability scale and requires a separate threshold protocol.
 6. Save models and predictions on validation and test.
 
 **Raw arm and missing values (current choice, open for discussion).** `raw` keeps missing values, and some models reject NaN. Checked with scikit-learn 1.9.1: logistic regression and gradient boosting reject it, while decision tree, random forest and CatBoost accept it. XGBoost and LightGBM are documented to accept it. A model that rejects NaN is not fitted on `raw`. Its records are `SKIPPED` with the reason `model rejects NaN`, and `baseline` vs `raw` is compared on the models that ran on both. On Bank Marketing nothing needs to be skipped, because no NaN is left after encoding. Polish Bankruptcy has real missing values, so some models are skipped there. The alternative is a fixed minimal fill on `raw`, which runs every model but means `raw` is no longer untouched. To be settled with the team and the mentors.
 
-**Status in code.** The baseline runs (`tools/baselines.py`, `docs/notes/baselines.md`) currently implement the minimal-fill alternative. Their `original` arm applies minimum imputation, scaling and encoding, and all nine models run on it. In those results `original` is `raw` and `cleaned` is `baseline`. In the first single-seed runs the two arms are equal on Default of Credit Card and Polish Bankruptcy and differ by 0.014 test PR-AUC on Bank Marketing, because the shared cleaning is itself median imputation. The missing-indicator and model-based treatments from section 5.1 are not implemented yet, so a repair effect on Polish Bankruptcy is not expected until they are.
+**Status in code.** The baseline runs (`tools/baselines.py`, `docs/notes/baselines.md`) currently implement the minimal-fill alternative. Their `original` arm applies minimum imputation, scaling and encoding, and the five frozen models run on it. In those results `original` is `raw` and `cleaned` is `baseline`. In the first single-seed runs the two arms are equal on Default of Credit Card and Polish Bankruptcy and differ by 0.014 test PR-AUC on Bank Marketing, because the shared cleaning is itself median imputation. The missing-indicator and model-based treatments from section 5.1 are not implemented yet, so a repair effect on Polish Bankruptcy is not expected until they are.
 
 **Outputs.** `TrainingOutput`: one `ModelRecord` for each arm, fill level (`smote` and `gan` only), model and seed, with the model path, the chosen hyperparameters, and the validation and test prediction paths. A model that was not fitted has a `SKIPPED` record with a reason.
 

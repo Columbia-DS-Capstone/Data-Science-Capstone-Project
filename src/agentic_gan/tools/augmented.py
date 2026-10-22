@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from agentic_gan.tools.baselines import run_models
+from agentic_gan.tools.baselines import build_models, load_protocol, run_models
 from agentic_gan.tools.preprocessing import Preprocessor
 from agentic_gan.tools.smotenc import smotenc_rows
 from agentic_gan.utils.datasets import DATASETS, DatasetConfig
@@ -23,18 +23,35 @@ from agentic_gan.utils.synthetic import IS_SYNTHETIC, fill_counts
 
 ROOT = Path(__file__).resolve().parents[3]
 ID_COLUMN = "source_row"
-SEEDS = (42, 43, 44, 45, 46)
+SEEDS = (42,)
 FILL_LEVELS = (0.10, 0.25, 0.50)
-# Provisional: top models by mean validation PR-AUC rank across the three datasets.
-DEFAULT_MODELS = ("Stacking ensemble", "CatBoost", "LightGBM", "Gradient boosting")
+# Fixed Sprint 2 suite, shared with the baseline runner.
+DEFAULT_MODELS = ("Gradient boosting", "LightGBM", "CatBoost", "Stacking ensemble", "Neural net")
 REAL_ONLY = "real_only"
 RESULT_COLUMNS = [
-    "dataset", "arm", "fill_level", "n_synthetic", "seed", "model", "status", "selected",
-    "val_pr_auc", "val_f1", "test_pr_auc", "test_f1", "test_precision", "test_recall",
-    "test_roc_auc", "test_accuracy", "fit_seconds",
+    "dataset",
+    "arm",
+    "fill_level",
+    "n_synthetic",
+    "seed",
+    "model",
+    "status",
+    "selected",
+    "protocol_id",
+    "threshold",
+    "threshold_source",
+    "val_pr_auc",
+    "val_f1",
+    "test_pr_auc",
+    "test_f1",
+    "test_precision",
+    "test_recall",
+    "test_roc_auc",
+    "test_accuracy",
+    "fit_seconds",
 ]
 KEYS = ["dataset", "arm", "fill_level", "seed"]
-DEFAULT_OUT = ROOT / "results" / "augmented_bank_marketing.csv"
+DEFAULT_OUT = ROOT / "results" / "augmented_bank_marketing_frozen.csv"
 BASELINES_FILE = ROOT / "results" / "baselines.csv"
 # Colorblind-safe (Okabe-Ito): one hue per arm, fixed order.
 ARM_COLORS = {"smotenc": "#0072B2", "ctgan_v1": "#E69F00", "ctgan_v2": "#009E73"}
@@ -74,6 +91,7 @@ def run_experiment(
     fill_levels: Sequence[float] = FILL_LEVELS,
     model_names: Sequence[str] = DEFAULT_MODELS,
     include_real_only: bool = True,
+    protocol_dir: Path = ROOT / "results",
 ) -> pd.DataFrame:
     """Return one row per fill level, seed and model.
 
@@ -95,6 +113,13 @@ def run_experiment(
     X_test, y_test = _encode(pre, real["test"], target)
     counts = fill_counts(real["train"][target], fill_levels)
 
+    # Validate every requested protocol before training or generating synthetic rows.
+    protocols = {}
+    for seed in seeds:
+        if set(model_names) != set(build_models(seed)) or len(model_names) != len(set(model_names)):
+            raise ValueError("Augmented arms must use the complete frozen baseline suite")
+        path = Path(protocol_dir) / f"baseline_protocol_{config.name}_{seed}_cv3.json"
+        protocols[seed] = load_protocol(path, seed=seed, cv_folds=3, y_val=y_val, y_test=y_test)
     frames = []
     for seed in seeds:
         levels = [(0.0, 0)] if include_real_only else []
@@ -119,9 +144,18 @@ def run_experiment(
                 arm = arm_label
             print(f"[{arm}] fill={fill:.2f} seed={seed} rows={len(X)}", flush=True)
             table = run_models(
-                X, y, X_val, y_val, X_test, y_test, seed=seed, cv_folds=0,
+                X,
+                y,
+                X_val,
+                y_val,
+                X_test,
+                y_test,
+                seed=seed,
+                cv_folds=0,
                 model_names=model_names,
+                thresholds=protocols[seed]["thresholds"],
             )
+            table["protocol_id"] = protocols[seed]["protocol_id"]
             table["dataset"], table["arm"] = config.name, arm
             table["fill_level"], table["n_synthetic"] = fill, n
             frames.append(table)
@@ -134,6 +168,12 @@ def save_results(table: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         old = pd.read_csv(path)
+        if "protocol_id" not in old or old.protocol_id.isna().any():
+            raise ValueError("Legacy 0.5-threshold results require a separate output file")
+        for (dataset, seed), incoming_rows in table.groupby(["dataset", "seed"]):
+            existing = old[(old.dataset == dataset) & (old.seed == seed)]
+            if set(existing.protocol_id) - set(incoming_rows.protocol_id):
+                raise ValueError("Cannot combine different frozen protocols in one comparison")
         incoming = set(map(tuple, table[KEYS].drop_duplicates().to_numpy()))
         keep = [tuple(row) not in incoming for row in old[KEYS].to_numpy()]
         table = pd.concat([old.loc[keep], table], ignore_index=True)
@@ -161,7 +201,13 @@ def noor_baseline(dataset: str, path: Path = BASELINES_FILE) -> dict | None:
     if not Path(path).exists():
         return None
     table = pd.read_csv(path)
-    row = table[(table.dataset == dataset) & (table.arm == "cleaned") & table.selected]
+    row = table[
+        (table.dataset == dataset)
+        & (table.arm == "cleaned")
+        & (table.seed == 42)
+        & (table.cv_folds == 3)
+        & table.selected
+    ]
     if row.empty:
         return None
     return {"test_pr_auc": float(row.test_pr_auc.iloc[0]), "test_f1": float(row.test_f1.iloc[0])}
@@ -176,19 +222,23 @@ def plot_summary(summary: pd.DataFrame, path: Path, baseline: dict | None = None
 
     real = summary[summary.arm == REAL_ONLY].iloc[0]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
-    panels = [("test_pr_auc", "Test PR-AUC (higher is better)"),
-              ("test_f1", "Test F1 at threshold 0.5")]
+    panels = [
+        ("test_pr_auc", "Test PR-AUC (higher is better)"),
+        ("test_f1", "Test F1 at frozen validation thresholds"),
+    ]
     for ax, (metric, title) in zip(axes, panels, strict=True):
         for arm in [a for a in summary.arm.unique() if a != REAL_ONLY]:
             rows = summary[summary.arm == arm].sort_values("fill_level")
             x = [0.0, *(rows.fill_level * 100)]
             y = [real[f"{metric}_mean"], *rows[f"{metric}_mean"]]
             err = [real[f"{metric}_std"], *rows[f"{metric}_std"]]
-            ax.errorbar(x, y, yerr=err, marker="o", lw=1.8, capsize=3, label=arm,
-                        color=ARM_COLORS.get(arm))
+            ax.errorbar(
+                x, y, yerr=err, marker="o", lw=1.8, capsize=3, label=arm, color=ARM_COLORS.get(arm)
+            )
         if baseline is not None:
-            ax.axhline(baseline[metric], color="#555555", ls=":", lw=1.2,
-                       label="Noor baseline (seed 42)")
+            ax.axhline(
+                baseline[metric], color="#555555", ls=":", lw=1.2, label="Noor baseline (seed 42)"
+            )
         ax.set_xticks([0, 10, 25, 50])
         ax.set_xlabel("Fill level (% of class gap added as synthetic subscribers)")
         ax.set_title(title, fontsize=11)
@@ -197,9 +247,10 @@ def plot_summary(summary: pd.DataFrame, path: Path, baseline: dict | None = None
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
     axes[0].legend(frameon=False, fontsize=9)
-    fig.suptitle("Bank Marketing: real-only (0%) vs real + synthetic rows; mean ± SD over seeds",
-                 fontsize=11)
-    note = "F1 at 0.5 rises partly because extra positives shift the model's probabilities."
+    fig.suptitle(
+        "Bank Marketing: real-only (0%) vs real + synthetic rows; mean ± SD over seeds", fontsize=11
+    )
+    note = "Thresholds are frozen from original-arm validation and reused at every fill level."
     fig.text(0.99, 0.005, note, ha="right", fontsize=8, color="#555555")
     fig.tight_layout(rect=(0, 0.03, 1, 0.95))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +267,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
     parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     parser.add_argument("--no-real-only", action="store_true")
+    parser.add_argument("--protocol-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
 
@@ -227,8 +279,15 @@ def main() -> None:
         )
         pool = pd.read_csv(path)
     table = run_experiment(
-        load_cleaned(config), config, args.generator, args.arm_label or args.generator, pool,
-        seeds=args.seeds, model_names=args.models, include_real_only=not args.no_real_only,
+        load_cleaned(config),
+        config,
+        args.generator,
+        args.arm_label or args.generator,
+        pool,
+        seeds=args.seeds,
+        model_names=args.models,
+        include_real_only=not args.no_real_only,
+        protocol_dir=args.protocol_dir,
     )
     save_results(table, args.out)
     combined = pd.read_csv(args.out)

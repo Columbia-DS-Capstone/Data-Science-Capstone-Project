@@ -119,7 +119,8 @@ See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatm
 
 ## Baseline models
 
-Compare original and cleaned data with nine models. Use Python 3.12 and `uv sync --frozen` first:
+Compare original and cleaned data with five fixed models: gradient boosting, LightGBM,
+CatBoost, stacking, and a neural net. Use Python 3.12 and `uv sync --frozen` first:
 
 ```bash
 uv run python -m agentic_gan.tools.baselines --dataset default --arm both
@@ -127,14 +128,44 @@ uv run python -m agentic_gan.tools.baselines --dataset polish --arm both
 uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both
 ```
 
-Omit `--arm both` to run only the cleaned arm. Both arms read raw inputs. The original arm uses minimum preparation; the cleaned arm applies shared cleaning rules. Imputation, encoding, and scaling are fitted within each training CV fold. Stacking base models also fit preprocessing within their inner folds. Final fitting uses training rows only; validation and test only receive the fitted transformations. Selection uses validation PR-AUC; the selected model receives test PR-AUC, ROC-AUC, F1, precision, recall, and accuracy. The compact `results/baselines.csv` contains validation PR-AUC, training CV PR-AUC mean/SD, and selected-model test metrics. Per-run JSON files retain full metrics, warnings, model settings, source/split hashes, and package versions. Seed defaults to 42 and CV folds to 3. Results accumulate in the CSV; matching dataset/arm/seed/CV runs are replaced on rerun. Run commands sharing this file sequentially.
+Run these commands sequentially because they share `results/baselines.csv`. On the first
+original-arm run, each model's threshold maximizes **validation F1**. Those numerical
+thresholds are saved in `results/baseline_protocol_<dataset>_42_cv3.json` and reused for
+cleaned and augmented arms. An existing protocol is never silently overwritten or retuned.
+Run `--arm both` or `--arm original` before running cleaned alone. Changed input data,
+splits, model settings, or dependency versions require a separate experiment directory.
 
-The Training Agent and synthetic-data experiments can reuse:
+Both arms read raw inputs. Preprocessing fits inside training CV folds and stacking's
+inner folds; the final fit uses training rows only. Models are ranked by validation
+trapezoidal PR-AUC. Only the validation winner gets test metrics. CSV metrics prioritize
+PR-AUC and F1, with accuracy last. Non-winner test cells are intentionally empty. The
+per-run JSON files retain diagnostics, model settings, source/split hashes, and versions.
+Defaults remain seed 42 and three-fold training CV; CV reports threshold-independent
+PR-AUC and ROC-AUC. Matching dataset/arm/seed/CV rows are replaced on rerun.
+
+The Training Agent consumes the frozen protocol:
 
 ```python
-from agentic_gan.tools.baselines import run_models
+from agentic_gan.agents.training import run_training_arms
 
-results = run_models(X_train, y_train, X_val, y_val, X_test, y_test, seed=42)
+results = run_training_arms(
+    training_sets, X_val, y_val, X_test, y_test,
+    protocol_path="results/baseline_protocol_bank_marketing_42_cv3.json",
+    seed=42, cv_folds=3,
+)
 ```
 
-Pass encoded features, or supply an unfitted `preprocessor=` for raw data. Synthetic rows belong only in the training inputs. See [baseline results and comparison notes](docs/notes/baselines.md) for measured results and comparison conventions.
+Supply the same real holdouts and feature schema for every arm. Synthetic rows belong
+only in the training inputs and use the real-training-fitted encoder. For raw data,
+supply an unfitted `preprocessor=`; for encoded data, omit it. The lower-level
+`run_models(..., thresholds=protocol["thresholds"])` API is also available. Omitting
+thresholds is reserved for original-arm calibration, not for comparison arms.
+
+The augmented runner also requires frozen protocols and the full five-model suite.
+It now defaults to seed 42, the seed frozen here. Additional seeds require reference
+protocols calibrated on the same real holdouts; changed holdout labels/order are rejected.
+It writes `results/augmented_bank_marketing_frozen.csv`, keeping the historical 0.5
+results separate. This task does not rerun the historical augmentation experiments.
+
+See [baseline results and rationale](docs/notes/baselines.md) for the model choices,
+thresholds, measured results, and dataset-specific explanations.
