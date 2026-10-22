@@ -18,10 +18,14 @@ from typing import Any
 import pandas as pd
 from ctgan import CTGAN
 
+from agentic_gan.utils.synthetic import IS_SYNTHETIC, fill_counts
+
+__all__ = [
+    "IS_SYNTHETIC", "TrainedCTGAN", "fill_counts", "load_model", "sample_synthetic",
+    "save_model", "train_ctgan",
+]
+
 logger = logging.getLogger(__name__)
-
-IS_SYNTHETIC = "is_synthetic"
-
 
 @dataclass
 class TrainedCTGAN:
@@ -217,15 +221,6 @@ def sample_synthetic(
     out = pd.concat(kept, ignore_index=True)
     out[IS_SYNTHETIC] = 1
     return out
-
-
-def fill_counts(y: pd.Series, fractions: Sequence[float] = (0.10, 0.25, 0.50)) -> dict[float, int]:
-    """Rows to generate for each fill level, as a share of the minority-to-majority gap."""
-    counts = y.value_counts()
-    if len(counts) != 2:
-        raise ValueError("fill_counts expects a binary target")
-    gap = int(counts.max() - counts.min())
-    return {f: round(gap * f) for f in fractions}
 
 
 def save_model(model: TrainedCTGAN, path: str | Path) -> None:
