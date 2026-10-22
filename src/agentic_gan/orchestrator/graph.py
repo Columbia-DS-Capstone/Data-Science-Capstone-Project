@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
+from agentic_gan.agents.quality import run_quality
 from agentic_gan.schemas import (
     STAGE_IO,
     EvaluationInput,
@@ -56,7 +57,9 @@ def config_for_dataset(dataset: str) -> RunConfig:
 
 def build_graph(agents=None):
     """Compile the visible stage graph; agents accept (typed request, RunDir)."""
-    agents = default_agents() if agents is None else agents
+    if agents is None:
+        agents = default_agents()
+        agents[Stage.QUALITY_CHECK] = run_quality
     if set(agents) != set(Stage):
         raise ValueError("provide one agent for every stage")
 

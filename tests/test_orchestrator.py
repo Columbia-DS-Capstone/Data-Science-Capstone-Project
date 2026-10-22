@@ -25,7 +25,7 @@ def test_graph_is_visualizable():
 def test_pass_first_time(tmp_path, monkeypatch):
     run_config = config(tmp_path)
     monkeypatch.chdir(tmp_path)
-    state, run = run_pipeline(run_config, runs_dir=Path("runs"))
+    state, run = run_pipeline(run_config, runs_dir=Path("runs"), agents=default_agents())
     assert state.is_complete
     assert state.gan_available is True
     assert [state.attempts(stage) for stage in Stage] == [1] * 6
