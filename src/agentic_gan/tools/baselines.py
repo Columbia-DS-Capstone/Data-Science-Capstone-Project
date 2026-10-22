@@ -175,8 +175,11 @@ def run_models(
     *,
     preprocessor=None,
     cv_folds=3,
+    model_names=None,
 ) -> pd.DataFrame:
     """Return one row per model; select on validation PR-AUC, test only the winner.
+
+    ``model_names`` optionally restricts the run to those keys of ``build_models``.
 
     Six positional inputs may be encoded arrays/DataFrames. For raw data, pass
     an unfitted sklearn-compatible preprocessor, cloned inside each CV fold.
@@ -190,6 +193,11 @@ def run_models(
     """
     _check_inputs(X_train, y_train, X_val, y_val, X_test, y_test, preprocessor, cv_folds)
     models = build_models(seed)
+    if model_names is not None:
+        unknown = sorted(set(model_names) - set(models))
+        if unknown:
+            raise ValueError(f"Unknown models: {unknown}")
+        models = {name: models[name] for name in model_names}
     rows, fitted = [], {}
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed) if cv_folds else None
     scoring = {
