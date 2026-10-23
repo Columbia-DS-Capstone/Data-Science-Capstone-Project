@@ -5,7 +5,7 @@ from pathlib import Path
 from agentic_gan.orchestrator.decisions import read_decisions
 from agentic_gan.orchestrator.graph import build_graph, run_pipeline
 from agentic_gan.orchestrator.stubs import StubAgent, default_agents
-from agentic_gan.schemas import Arm, RunConfig, Stage, Status
+from agentic_gan.schemas import Arm, GeneratorOutput, RunConfig, Stage, Status
 
 
 def config(tmp_path):
@@ -80,6 +80,31 @@ def test_stage_error_retries_once_then_stops(tmp_path):
     assert read_decisions(run).query("rule == 'stage_error'").outcome.tolist() == [
         "RETRY", "FAILED"
     ]
+    assert run.load_manifest().verify(run) == []
+
+
+def test_skipped_selection_skips_quality_and_continues(tmp_path):
+    agents = default_agents()
+
+    def skipped(request, run):
+        return GeneratorOutput(
+            status=Status.SKIPPED,
+            reason="wgan_gp is not implemented",
+            generator="wgan_gp",
+            rationale="Documented fallback: ctgan.",
+        )
+
+    agents[Stage.MODEL_SELECTION] = skipped
+    state, run = run_pipeline(config(tmp_path), runs_dir=tmp_path / "runs", agents=agents)
+    assert state.is_complete
+    assert state.gan_available is False
+    assert state.gan_unavailable_reason
+    assert state.status(Stage.MODEL_SELECTION) is Status.SKIPPED
+    assert state.status(Stage.QUALITY_CHECK) is Status.SKIPPED
+    assert state.attempts(Stage.QUALITY_CHECK) == 0
+    assert state.attempts(Stage.MODEL_SELECTION) == 1
+    assert state.status(Stage.TRAINING) is Status.SUCCESS
+    assert read_decisions(run).query("rule == 'selection_skipped'").outcome.tolist() == ["SKIPPED"]
     assert run.load_manifest().verify(run) == []
 
 
