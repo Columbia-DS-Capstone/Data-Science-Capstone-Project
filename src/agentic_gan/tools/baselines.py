@@ -1,4 +1,4 @@
-"""Five frozen binary baselines with validation-selected, shared arm thresholds."""
+"""Four frozen binary baselines with validation-selected, shared arm thresholds."""
 
 import argparse
 import hashlib
@@ -27,16 +27,16 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from threadpoolctl import threadpool_limits
 
 from agentic_gan.tools.preprocessing import Preprocessor, load_dataset, normalize, split_dataset
 from agentic_gan.utils.datasets import load_configs
+from agentic_gan.utils.files import sha256_file
 
 METRICS = ("pr_auc", "f1", "roc_auc", "precision", "recall", "accuracy")
-SUITE_VERSION = "sprint2-five-models-v1"
+SUITE_VERSION = "sprint2-four-models-v3"
 
 
 RESULT_COLUMNS = [
@@ -70,7 +70,14 @@ def build_models(seed=42):
     from lightgbm import LGBMClassifier
 
     models = {
-        "Gradient boosting": GradientBoostingClassifier(random_state=seed),
+        # Shallow, stochastic trees bound exact split-search cost on IEEE-CIS.
+        "Gradient boosting": GradientBoostingClassifier(
+            n_estimators=50,
+            max_depth=2,
+            max_features="sqrt",
+            subsample=0.2,
+            random_state=seed,
+        ),
         "LightGBM": LGBMClassifier(n_estimators=150, verbosity=-1, n_jobs=2, random_state=seed),
         "CatBoost": CatBoostClassifier(
             iterations=200, thread_count=2, verbose=0, random_seed=seed, allow_writing_files=False
@@ -78,22 +85,15 @@ def build_models(seed=42):
     }
     models["Stacking ensemble"] = StackingClassifier(
         estimators=[
-            ("logistic", LogisticRegression(max_iter=1000, random_state=seed)),
-            ("forest", RandomForestClassifier(n_estimators=100, n_jobs=2, random_state=seed)),
-            ("lightgbm", clone(models["LightGBM"])),
+            ("logistic", LogisticRegression(max_iter=100, tol=0.05, random_state=seed)),
+            ("forest", RandomForestClassifier(
+                n_estimators=10, max_depth=6, n_jobs=1, random_state=seed
+            )),
         ],
-        final_estimator=LogisticRegression(max_iter=1000, random_state=seed),
+        final_estimator=LogisticRegression(max_iter=100, tol=0.05, random_state=seed),
         stack_method="predict_proba",
-        cv=3,
+        cv=2,
         n_jobs=1,
-    )
-    models["Neural net"] = MLPClassifier(
-        hidden_layer_sizes=(100,),
-        max_iter=300,
-        early_stopping=True,
-        validation_fraction=0.1,
-        n_iter_no_change=10,
-        random_state=seed,
     )
     return models
 
@@ -449,19 +449,19 @@ def prepare_inputs(dataset, arm, root, seed, config_path=None):
     config = load_configs(config_path)[dataset]
     config = replace(config, split={**config.split, "seed": seed})
     raw = load_dataset(config, root / config.file)
-    data = raw.copy()
-    data[config.target] = normalize(raw, config, config.include_duration)[config.target]
+    # Normalize IEEE features before model fitting: this removes the transaction key
+    # and split clock while retaining the raw table for the configured time split.
+    data = normalize(raw, config, config.include_duration)
+    split_source = raw if config.name == "ieee_cis" else data
     if arm == "cleaned":
         transformer = SharedPreprocessor(config)
     else:
-        if dataset == "bank_marketing" and not config.include_duration:
-            data = data.drop(columns="duration")
         transformer = _minimal_transformer(
             data.drop(columns=config.target), config.discrete, config.imputation
         )
-    ids = split_dataset(data, config)
+    ids = split_dataset(split_source, config)
     frames = [data.loc[ids[name]] for name in ("train", "validation", "test")]
-    source_hash = hashlib.sha256((root / config.file).read_bytes()).hexdigest()
+    source_hash = source_hash_for(config, root / config.file)
     inputs = tuple(
         item
         for frame in frames
@@ -481,6 +481,21 @@ def prepare_inputs(dataset, arm, root, seed, config_path=None):
         "python": platform.python_version(),
     }
     return inputs, transformer, metadata
+
+
+def source_hash_for(config, source_path):
+    """Hash every source file that defines a dataset, including IEEE identity rows."""
+    source_path = Path(source_path)
+    if config.name != "ieee_cis":
+        return sha256_file(source_path)
+    identity_path = source_path.parent / Path(config.merge["file"]).name
+    if not identity_path.is_file():
+        raise FileNotFoundError(f"IEEE-CIS identity table not found: {identity_path}")
+    digest = hashlib.sha256()
+    for label, path in (("transaction", source_path), ("identity", identity_path)):
+        digest.update(label.encode("utf-8"))
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
 
 
 def save_results(table, path):

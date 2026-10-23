@@ -134,7 +134,6 @@ class RunConfig(Schema):
             "LightGBM",
             "CatBoost",
             "Stacking ensemble",
-            "Neural net",
         ],
         min_length=1,
     )

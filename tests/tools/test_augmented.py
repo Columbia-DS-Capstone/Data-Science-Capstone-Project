@@ -51,12 +51,12 @@ def test_smotenc_experiment_end_to_end(tables, tmp_path, monkeypatch):
     }
     for seed in (1, 2):
         baselines.freeze_protocol(
-            tmp_path / f"baseline_protocol_bank_marketing_{seed}_cv3.json",
+            tmp_path / f"baseline_protocol_bank_marketing_{seed}_cv0.json",
             pd.DataFrame({"model": ["test model"], "status": ["success"], "threshold": [0.1]}),
             metadata,
             dataset="bank_marketing",
             seed=seed,
-            cv_folds=3,
+            cv_folds=0,
             y_val=tables["validation"].y,
             y_test=tables["test"].y,
         )
@@ -74,6 +74,7 @@ def test_smotenc_experiment_end_to_end(tables, tmp_path, monkeypatch):
     assert set(out.arm) == {"real_only", "smotenc"}
     assert (out.status == "success").all()
     assert set(out.threshold) == {0.1}
+    assert set(out.cv_folds) == {0}
     assert out.groupby(["arm", "seed"]).selected.sum().eq(1).all()
     expected = fill_counts(tables["train"]["y"], (0.10,))[0.10]
     assert list(out[out.arm == "smotenc"].n_synthetic.unique()) == [expected]
@@ -105,6 +106,31 @@ def test_legacy_threshold_results_cannot_be_mixed(tmp_path):
     pd.DataFrame({"dataset": ["bank_marketing"], "seed": [42]}).to_csv(path, index=False)
     with pytest.raises(ValueError, match="Legacy 0.5"):
         save_results(pd.DataFrame(), path)
+
+
+def test_noor_baseline_reads_the_protocol_selected_for_seed(tmp_path, monkeypatch):
+    protocol_dir = tmp_path / "protocols"
+    protocol_dir.mkdir()
+    (protocol_dir / "baseline_protocol_default_42_cv0.json").write_text(
+        '{"protocol_id": "frozen-cv0"}'
+    )
+    results = tmp_path / "baselines.csv"
+    pd.DataFrame(
+        {
+            "dataset": ["default", "default"],
+            "arm": ["cleaned", "cleaned"],
+            "seed": [42, 42],
+            "protocol_id": ["old", "frozen-cv0"],
+            "selected": [True, True],
+            "test_pr_auc": [0.1, 0.6],
+            "test_f1": [0.2, 0.5],
+        }
+    ).to_csv(results, index=False)
+
+    assert augmented.noor_baseline("default", results, protocol_dir) == {
+        "test_pr_auc": 0.6,
+        "test_f1": 0.5,
+    }
 
 
 def test_augmented_models_cannot_drift_from_frozen_suite(tables, tmp_path):

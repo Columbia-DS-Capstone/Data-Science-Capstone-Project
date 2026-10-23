@@ -20,10 +20,26 @@ training-only cleaning. Any synthetic flag in a real file must be exactly zero;
 missing or ambiguous flags are rejected. This prevents an unflagged replacement
 row or a changed holdout from silently entering the comparison.
 
-The default reference is
-`results/baseline_protocol_<dataset>_<split_seed>_cv3.json` from issue #52. Override
-its location with `RunConfig.training_protocol_path` or the `protocol_path=` keyword.
-The models are gradient boosting, LightGBM, CatBoost, stacking, and the neural net.
+For IEEE-CIS, the source hash covers both transaction and identity CSVs. The original
+and cleaned feature matrices both omit `TransactionID` and `TransactionDT`; the time
+column defines the split but never enters model fitting.
+
+The reference is `results/baseline_protocol_<dataset>_<split_seed>_cv<folds>.json` from
+issue #52. The Training Agent uses the canonical CV3 file when present, or discovers a
+single alternate protocol such as the refreshed CV0 file. It reads the fold setting from
+the frozen protocol, allowing a validation-only
+protocol (`cv_folds=0`) when full-data cross-validation is too costly. IEEE-CIS uses that
+setting for its 100k-row training sample. Override the path with
+`RunConfig.training_protocol_path` or the `protocol_path=` keyword.
+Each dataset needs its own original-arm reference. After IEEE-CIS preprocessing, run this
+to freeze its validation F1 thresholds before training:
+
+```bash
+python -m agentic_gan.tools.baselines --dataset ieee_cis --arm both --cv-folds 0
+```
+
+The training agent reports this setup step if the protocol is missing.
+The models are gradient boosting, LightGBM, CatBoost, and stacking.
 `candidate_models` must match that complete suite. No tuning or probability
 calibration occurs here; feature exclusions, changed splits, or changed settings
 require a new reference experiment.
@@ -124,5 +140,5 @@ output = run_training(request, run)
 
 Tests in `tests/test_training_agent.py` cover all arm/level/seed combinations,
 frozen thresholds, serialization and manifest registration, provenance rejection,
-failure propagation, deterministic reruns, fold-local generation, a real five-model
+failure propagation, deterministic reruns, fold-local generation, a real four-model
 smoke run, and the orchestrator's filtering of quality-rejected fill levels.

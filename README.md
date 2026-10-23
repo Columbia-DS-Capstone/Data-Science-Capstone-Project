@@ -70,12 +70,12 @@ This project was created for academic purposes. Usage of project code, data, or 
 
 ## Shared preprocessing
 
-One script prepares Bank Marketing, Default, and Polish Bankruptcy data:
+One script prepares Bank Marketing, Default, Polish Bankruptcy, and IEEE-CIS data:
 `src/agentic_gan/tools/preprocessing.py`.
 
 ### Configuration
 
-Edit [datasets.json](src/agentic_gan/utils/datasets.json) to set each dataset's input path, target column, categorical columns, imputation method, and split settings. Defaults are stratified **60% training / 20% validation / 20% test**, **seed 42**, and **median imputation**. Bank's post-call `duration` feature is excluded by default.
+Edit [datasets.json](src/agentic_gan/utils/datasets.json) to set each dataset's input path, target column, categorical columns, imputation method, and split settings. Bank, Default, and Polish use stratified **60% training / 20% validation / 20% test**, **seed 42**, and **median imputation**. IEEE-CIS uses the fixed time split, deduplication, and training-only sample from issue #50. Bank's post-call `duration` feature is excluded by default.
 
 Place the raw inputs at the configured paths (relative to the repo root):
 
@@ -84,6 +84,7 @@ Place the raw inputs at the configured paths (relative to the repo root):
 | Bank Marketing | `data/raw/bank_marketing.csv` |
 | Default | `data/raw/default.csv` |
 | Polish Bankruptcy | `data/raw/polish_companies_bankruptcy_uci365.zip` |
+| IEEE-CIS | `data/external/train_transaction.csv` and `train_identity.csv` |
 
 The script reads local inputs; it does not download them. See the [input format details](docs/preprocessing.md) before preparing the files.
 
@@ -95,6 +96,7 @@ After `uv sync`, run from the repo root:
 uv run python -m agentic_gan.tools.preprocessing --dataset bank_marketing
 uv run python -m agentic_gan.tools.preprocessing --dataset default
 uv run python -m agentic_gan.tools.preprocessing --dataset polish
+uv run python -m agentic_gan.tools.preprocessing --dataset ieee_cis
 ```
 
 The script generates splits directly from the config. The same input rows in the same order, settings, and software versions reproduce the same splits. Imputation, category encoding, and scaling are learned **only from training rows**.
@@ -105,33 +107,33 @@ Optional overrides include `--config /path/to/datasets.json`, `--input /path/to/
 
 Results are written to `data/interim/<dataset>/`:
 
-Each dataset folder contains only:
+Bank, Default and Polish each contain:
 
 - `train_cleaned.csv`
 - `validation_cleaned.csv`
 - `test_cleaned.csv`
 
-These tables contain corrected and imputed features before encoding/scaling. `source_row` identifies source rows and must be excluded from model/GAN features. The baseline runner fits encoding and scaling in memory using training rows only. Rerunning preprocessing replaces the cleaned files and removes legacy generated artifacts. Raw inputs and generated outputs are ignored by Git.
-
-Fraud preprocessing is deferred.
+These tables contain corrected and imputed features before encoding/scaling. `source_row` identifies source rows and must be excluded from model/GAN features. The baseline runner fits encoding and scaling in memory using training rows only. IEEE-CIS uses the time split and training sample from issue #50, and also writes sparse scaled/encoded matrices, encoder settings, a treatment log, and a manifest under `data/interim/ieee_cis/`. Its identifier and time columns are excluded from features; all fitted cleaning and encoding rules come from the training sample. Raw inputs and generated outputs are ignored by Git.
 
 See [preprocessing setup and tool API](docs/preprocessing.md) for dataset treatments and preprocessing tool reuse.
 
 ## Baseline models
 
-Compare original and cleaned data with five fixed models: gradient boosting, LightGBM,
-CatBoost, stacking, and a neural net. Use Python 3.12 and `uv sync --frozen` first:
+Compare original and cleaned data with four fixed models: gradient boosting, LightGBM,
+CatBoost, and stacking. Use Python 3.12 and `uv sync --frozen` first:
 
 ```bash
-uv run python -m agentic_gan.tools.baselines --dataset default --arm both
-uv run python -m agentic_gan.tools.baselines --dataset polish --arm both
-uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both
+uv run python -m agentic_gan.tools.baselines --dataset default --arm both --cv-folds 0
+uv run python -m agentic_gan.tools.baselines --dataset polish --arm both --cv-folds 0
+uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both --cv-folds 0
 ```
 
 Run these commands sequentially because they share `results/baselines.csv`. On the first
 original-arm run, each model's threshold maximizes **validation F1**. Those numerical
-thresholds are saved in `results/baseline_protocol_<dataset>_42_cv3.json` and reused for
-cleaned and augmented arms. An existing protocol is never silently overwritten or retuned.
+thresholds are saved in `results/baseline_protocol_<dataset>_42_cv<folds>.json` and reused for
+cleaned and augmented arms. IEEE-CIS uses `--cv-folds 0` because full-data CV is optional and
+prohibitively slow at its 100k-row training size; the Training Agent reads this setting from
+the protocol. An existing protocol is never silently overwritten or retuned.
 Run `--arm both` or `--arm original` before running cleaned alone. Changed input data,
 splits, model settings, or dependency versions require a separate experiment directory.
 
@@ -140,8 +142,9 @@ inner folds; the final fit uses training rows only. Models are ranked by validat
 trapezoidal PR-AUC. Only the validation winner gets test metrics. CSV metrics prioritize
 PR-AUC and F1, with accuracy last. Non-winner test cells are intentionally empty. The
 per-run JSON files retain diagnostics, model settings, source/split hashes, and versions.
-Defaults remain seed 42 and three-fold training CV; CV reports threshold-independent
-PR-AUC and ROC-AUC. Matching dataset/arm/seed/CV rows are replaced on rerun.
+The refreshed protocols use seed 42 with optional training CV disabled for speed. CV, when
+enabled, reports threshold-independent PR-AUC and ROC-AUC. Matching dataset/arm/seed/CV rows
+are replaced on rerun.
 
 The file-based Training Agent is `agents.training.run_training(request, run)`. It runs the
 frozen suite on original, cleaned, SMOTENC, and quality-accepted CTGAN arms, saves models and
@@ -155,8 +158,8 @@ from agentic_gan.agents.training import run_training_arms
 
 results = run_training_arms(
     training_sets, X_val, y_val, X_test, y_test,
-    protocol_path="results/baseline_protocol_bank_marketing_42_cv3.json",
-    seed=42, cv_folds=3,
+    protocol_path="results/baseline_protocol_bank_marketing_42_cv0.json",
+    seed=42, cv_folds=0,
 )
 ```
 
@@ -166,7 +169,7 @@ supply an unfitted `preprocessor=`; for encoded data, omit it. The lower-level
 `run_models(..., thresholds=protocol["thresholds"])` API is also available. Omitting
 thresholds is reserved for original-arm calibration, not for comparison arms.
 
-The augmented runner also requires frozen protocols and the full five-model suite.
+The augmented runner also requires frozen protocols and the full four-model suite.
 It now defaults to seed 42, the seed frozen here. Additional seeds require reference
 protocols calibrated on the same real holdouts; changed holdout labels/order are rejected.
 It writes `results/augmented_bank_marketing_frozen.csv`, keeping the historical 0.5

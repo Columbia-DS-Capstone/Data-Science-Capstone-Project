@@ -28,9 +28,8 @@ def test_fixed_suite():
         "LightGBM",
         "CatBoost",
         "Stacking ensemble",
-        "Neural net",
     }
-    assert len(models["Stacking ensemble"].estimators) == 3
+    assert len(models["Stacking ensemble"].estimators) == 2
 
 
 @pytest.mark.parametrize(
@@ -121,7 +120,6 @@ def test_training_agent_reuses_thresholds_on_every_arm(frozen, monkeypatch):
         X[:4],
         y,
         protocol_path=path,
-        cv_folds=0,
     )
     assert set(result.threshold) == {0.2}
     assert set(result.protocol_id) == {protocol["protocol_id"]}

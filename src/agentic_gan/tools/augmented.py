@@ -10,6 +10,7 @@ PR-AUC method match Noor's baseline (``tools/baselines.py``); only the model see
 """
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -26,7 +27,7 @@ ID_COLUMN = "source_row"
 SEEDS = (42,)
 FILL_LEVELS = (0.10, 0.25, 0.50)
 # Fixed Sprint 2 suite, shared with the baseline runner.
-DEFAULT_MODELS = ("Gradient boosting", "LightGBM", "CatBoost", "Stacking ensemble", "Neural net")
+DEFAULT_MODELS = ("Gradient boosting", "LightGBM", "CatBoost", "Stacking ensemble")
 REAL_ONLY = "real_only"
 RESULT_COLUMNS = [
     "dataset",
@@ -34,6 +35,7 @@ RESULT_COLUMNS = [
     "fill_level",
     "n_synthetic",
     "seed",
+    "cv_folds",
     "model",
     "status",
     "selected",
@@ -55,6 +57,33 @@ DEFAULT_OUT = ROOT / "results" / "augmented_bank_marketing_frozen.csv"
 BASELINES_FILE = ROOT / "results" / "baselines.csv"
 # Colorblind-safe (Okabe-Ito): one hue per arm, fixed order.
 ARM_COLORS = {"smotenc": "#0072B2", "ctgan_v1": "#E69F00", "ctgan_v2": "#009E73"}
+
+
+def _protocol_path(protocol_dir, dataset, seed):
+    """Prefer the canonical CV3 protocol, or discover a unique alternate protocol."""
+    root = Path(protocol_dir)
+    canonical = root / f"baseline_protocol_{dataset}_{seed}_cv3.json"
+    if canonical.is_file():
+        return canonical
+    candidates = sorted(root.glob(f"baseline_protocol_{dataset}_{seed}_cv*.json"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(
+            f"Multiple frozen baseline protocols found for {dataset} seed {seed}; "
+            "remove ambiguity or pass a protocol directory containing one"
+        )
+    return canonical
+
+
+def _protocol_cv_folds(path):
+    try:
+        folds = json.loads(Path(path).read_text()).get("cv_folds")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read the frozen protocol CV setting: {path}") from exc
+    if isinstance(folds, bool) or not isinstance(folds, int) or (folds != 0 and folds < 2):
+        raise ValueError(f"Frozen protocol has an invalid cv_folds value: {folds!r}")
+    return folds
 
 
 def load_cleaned(config: DatasetConfig, root: Path = ROOT) -> dict[str, pd.DataFrame]:
@@ -115,11 +144,19 @@ def run_experiment(
 
     # Validate every requested protocol before training or generating synthetic rows.
     protocols = {}
+    protocol_cv_folds = {}
     for seed in seeds:
         if set(model_names) != set(build_models(seed)) or len(model_names) != len(set(model_names)):
             raise ValueError("Augmented arms must use the complete frozen baseline suite")
-        path = Path(protocol_dir) / f"baseline_protocol_{config.name}_{seed}_cv3.json"
-        protocols[seed] = load_protocol(path, seed=seed, cv_folds=3, y_val=y_val, y_test=y_test)
+        path = _protocol_path(protocol_dir, config.name, seed)
+        protocol_cv_folds[seed] = _protocol_cv_folds(path)
+        protocols[seed] = load_protocol(
+            path,
+            seed=seed,
+            cv_folds=protocol_cv_folds[seed],
+            y_val=y_val,
+            y_test=y_test,
+        )
     frames = []
     for seed in seeds:
         levels = [(0.0, 0)] if include_real_only else []
@@ -151,7 +188,7 @@ def run_experiment(
                 X_test,
                 y_test,
                 seed=seed,
-                cv_folds=0,
+                cv_folds=protocol_cv_folds[seed],
                 model_names=model_names,
                 thresholds=protocols[seed]["thresholds"],
             )
@@ -196,16 +233,24 @@ def summarize(table: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
-def noor_baseline(dataset: str, path: Path = BASELINES_FILE) -> dict | None:
+def noor_baseline(
+    dataset: str,
+    path: Path = BASELINES_FILE,
+    protocol_dir: Path = ROOT / "results",
+) -> dict | None:
     """Noor's seed-42 test PR-AUC and F1 for the validation winner of the cleaned arm."""
     if not Path(path).exists():
         return None
     table = pd.read_csv(path)
+    protocol_path = _protocol_path(protocol_dir, dataset, 42)
+    if not protocol_path.is_file():
+        return None
+    protocol = json.loads(protocol_path.read_text())
     row = table[
         (table.dataset == dataset)
         & (table.arm == "cleaned")
         & (table.seed == 42)
-        & (table.cv_folds == 3)
+        & (table.protocol_id == protocol["protocol_id"])
         & table.selected
     ]
     if row.empty:
@@ -293,7 +338,11 @@ def main() -> None:
     combined = pd.read_csv(args.out)
     summary = summarize(combined)
     print(summary.round(4).to_string(index=False))
-    plot_summary(summary, args.out.with_suffix(".png"), noor_baseline(config.name))
+    plot_summary(
+        summary,
+        args.out.with_suffix(".png"),
+        noor_baseline(config.name, protocol_dir=args.protocol_dir),
+    )
 
 
 if __name__ == "__main__":

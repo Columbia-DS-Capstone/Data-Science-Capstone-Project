@@ -26,7 +26,6 @@ from agentic_gan.tools.baselines import load_protocol, run_models
 from agentic_gan.tools.preprocessing import Preprocessor, load_dataset, normalize
 from agentic_gan.tools.smotenc import smotenc_rows
 from agentic_gan.utils.datasets import load_configs
-from agentic_gan.utils.files import sha256_file
 from agentic_gan.utils.synthetic import IS_SYNTHETIC
 
 __all__ = ["run_models", "run_training", "run_training_arms"]
@@ -106,6 +105,37 @@ def _same_table(actual, expected, label):
         raise ValueError(f"{label} differs from the frozen source/training-only cleaning") from exc
 
 
+def _protocol_cv_folds(protocol_path):
+    """Read the fold setting, then let load_protocol verify its checksum and drift."""
+    try:
+        folds = json.loads(Path(protocol_path).read_text()).get("cv_folds")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read the frozen protocol's CV setting: {protocol_path}") from exc
+    if isinstance(folds, bool) or not isinstance(folds, int) or (folds != 0 and folds < 2):
+        raise ValueError(f"Frozen protocol has an invalid cv_folds value: {folds!r}")
+    return folds
+
+
+def _find_training_protocol(cfg, protocol_path=None):
+    if protocol_path or cfg.training_protocol_path:
+        return Path(protocol_path or cfg.training_protocol_path)
+    results = ROOT / "results"
+    canonical = results / f"baseline_protocol_{cfg.dataset_name}_{cfg.split_seed}_cv3.json"
+    if canonical.is_file():
+        return canonical
+    candidates = sorted(
+        results.glob(f"baseline_protocol_{cfg.dataset_name}_{cfg.split_seed}_cv*.json")
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(
+            "Multiple frozen baseline protocols exist; set training_protocol_path to the "
+            "protocol for this experiment"
+        )
+    return canonical
+
+
 def _inputs(request, run, protocol_path):
     cfg = request.config
     if cfg.calibrate or cfg.excluded_features:
@@ -124,7 +154,7 @@ def _inputs(request, run, protocol_path):
     raw = _read_real(request.raw, config, run)
     cleaned = _read_real(request.baseline, config, run)
     metadata = {
-        "source_sha256": sha256_file(cfg.dataset_path),
+        "source_sha256": baselines.source_hash_for(config, cfg.dataset_path),
         "split_hashes": {part: baselines._digest(t.index.tolist()) for part, t in raw.items()},
         "config": asdict(config),
     }
@@ -132,7 +162,7 @@ def _inputs(request, run, protocol_path):
     protocol = load_protocol(
         protocol_path,
         seed=cfg.split_seed,
-        cv_folds=3,
+        cv_folds=_protocol_cv_folds(protocol_path),
         metadata=metadata,
         y_val=raw["validation"][cfg.target],
         y_test=raw["test"][cfg.target],
@@ -140,7 +170,7 @@ def _inputs(request, run, protocol_path):
     if protocol["dataset"] != cfg.dataset_name:
         raise ValueError("Frozen protocol belongs to a different dataset")
     if set(cfg.candidate_models) != set(protocol["models"]):
-        raise ValueError("candidate_models must contain exactly the frozen five-model suite")
+        raise ValueError("candidate_models must contain exactly the frozen four-model suite")
     source = load_dataset(config, cfg.dataset_path)
     source[cfg.target] = normalize(source, config, config.include_duration)[cfg.target]
     for part, data in raw.items():
@@ -194,6 +224,10 @@ def _model_data(table, config, *, original=False, synthetic=None):
         data = pd.concat([data, synthetic.assign(**{IS_SYNTHETIC: 1})], ignore_index=True)
     if original and config.name == "bank_marketing" and not config.include_duration:
         data = data.drop(columns="duration", errors="ignore")
+    if config.name == "ieee_cis":
+        data = data.drop(
+            columns=[config.id_column, config.split["time_column"]], errors="ignore"
+        )
     return data.drop(columns=config.target), data[config.target]
 
 
@@ -482,11 +516,13 @@ def run_training(request: TrainingRequest, run: RunDir, *, protocol_path=None, c
     The reference protocol's split seed stays fixed while config.seeds varies model randomness.
     """
     cfg = request.config
-    path = Path(
-        protocol_path
-        or cfg.training_protocol_path
-        or (ROOT / "results" / f"baseline_protocol_{cfg.dataset_name}_{cfg.split_seed}_cv3.json")
-    )
+    path = _find_training_protocol(cfg, protocol_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Frozen baseline protocol not found: {path}. Freeze this dataset's original-arm "
+            f"thresholds first with `python -m agentic_gan.tools.baselines --dataset "
+            f"{cfg.dataset_name} --arm both --cv-folds 3`."
+        )
     config, raw, cleaned, protocol = _inputs(request, run, path)
     accepted = {}
     train = cleaned["train"]
@@ -578,7 +614,7 @@ def run_training_arms(
     *,
     protocol_path,
     preprocessor=None,
-    cv_folds=3,
+    cv_folds=None,
 ):
     """Run each {arm: (X_train, y_train)} with identical holdouts and settings.
 
@@ -590,6 +626,8 @@ def run_training_arms(
     """
     if not training_sets:
         raise ValueError("Supply at least one training arm")
+    if cv_folds is None:
+        cv_folds = _protocol_cv_folds(protocol_path)
     protocol = load_protocol(
         protocol_path, seed=seed, cv_folds=cv_folds, y_val=y_val, y_test=y_test
     )

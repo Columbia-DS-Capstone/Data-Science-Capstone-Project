@@ -48,7 +48,7 @@ def experiment(tmp_path, monkeypatch):
     return make_experiment(tmp_path)
 
 
-def make_experiment(tmp_path):
+def make_experiment(tmp_path, *, cv_folds=3):
     source = tmp_path / "default.csv"
     rng = np.random.default_rng(11)
     pd.DataFrame(
@@ -98,7 +98,7 @@ def make_experiment(tmp_path):
         metadata,
         dataset="default",
         seed=42,
-        cv_folds=3,
+        cv_folds=cv_folds,
         y_val=raw["validation"].y,
         y_test=raw["test"].y,
     )
@@ -258,6 +258,31 @@ def test_protocol_checksum_checked(experiment):
         training.run_training(request, run)
 
 
+def test_missing_protocol_explains_how_to_freeze_thresholds(experiment, tmp_path):
+    request, run, *_ = experiment
+    missing = tmp_path / "not_frozen.json"
+    request = request.updated(config=request.config.updated(training_protocol_path=missing))
+    with pytest.raises(FileNotFoundError, match="--dataset default --arm both --cv-folds 3"):
+        training.run_training(request, run)
+
+
+def test_training_discovers_validation_only_protocol(tmp_path, monkeypatch):
+    monkeypatch.setattr(b, "build_models", tiny_suite)
+    monkeypatch.setattr(training, "ROOT", tmp_path)
+    request, run, *_ = make_experiment(tmp_path, cv_folds=0)
+    protocol_dir = tmp_path / "results"
+    protocol_dir.mkdir()
+    protocol_path = protocol_dir / "baseline_protocol_default_42_cv0.json"
+    shutil.copyfile(request.config.training_protocol_path, protocol_path)
+    request = request.updated(config=request.config.updated(training_protocol_path=None))
+
+    result = training.run_training(request, run)
+
+    assert result.status is Status.SUCCESS
+    assert {record.threshold for record in result.records} == {0.27}
+    assert json.loads(result.protocol_path.read_text())["cv_folds"] == 0
+
+
 def test_no_accepted_gan_keeps_other_arms(experiment):
     request, run, *_ = experiment
     request = request.updated(accepted_synthetic=[])
@@ -357,11 +382,11 @@ def test_cv_gan_factory_receives_only_fold_training_rows(experiment):
         assert held | fit_ids == set(raw["train"].index) | set(raw["validation"].index)
 
 
-def test_real_five_model_suite_smoke(tmp_path):
+def test_real_four_model_suite_smoke(tmp_path):
     request, run, *_ = make_experiment(tmp_path)
     request = request.updated(config=request.config.updated(seeds=[42], fill_levels=[0.25]))
     result = training.run_training(request, run)
-    assert len(result.records) == 20
+    assert len(result.records) == 16
     assert result.status is Status.SUCCESS, [(r.model, r.reason) for r in result.records]
     assert {r.model for r in result.records} == set(b.build_models())
 
@@ -378,6 +403,7 @@ def test_default_graph_dispatches_to_training_agent(experiment, monkeypatch):
         return stub(incoming, run)
 
     monkeypatch.setattr(graph, "run_training", capture)
+    monkeypatch.setattr(graph, "run_quality", default_agents()[Stage.QUALITY_CHECK])
     state, _ = graph.run_pipeline(
         request.config, runs_dir=request.config.dataset_path.parent / "dispatch_runs"
     )
