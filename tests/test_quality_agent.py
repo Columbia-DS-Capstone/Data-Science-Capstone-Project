@@ -142,6 +142,8 @@ def test_quality_agent_in_graph(tmp_path, monkeypatch, scenario, attempts, avail
     generator = GeneratorFixture()
     agents[Stage.MODEL_SELECTION] = generator
     monkeypatch.setattr(graph_module, "default_agents", lambda: agents)
+    # This test exercises quality routing; keep the downstream model-training stage stubbed.
+    monkeypatch.setattr(graph_module, "run_training", agents[Stage.TRAINING])
 
     state, run = graph_module.run_pipeline(_config(tmp_path), runs_dir=tmp_path / "runs")
     assert state.is_complete

@@ -130,16 +130,25 @@ class RunConfig(Schema):
     gan_bounds: dict[str, tuple[float, float]] = Field(default_factory=dict)
     candidate_models: list[str] = Field(
         default_factory=lambda: [
-            "logistic_regression",
-            "random_forest",
-            "gradient_boosting",
-            "xgboost",
-            "lightgbm",
+            "Gradient boosting",
+            "LightGBM",
+            "CatBoost",
+            "Stacking ensemble",
         ],
         min_length=1,
     )
     min_rows: int = Field(2000, ge=1)
     calibrate: bool = False
+    training_protocol_path: Path | None = None
+    training_cv_folds: int = Field(0, ge=0)
+    training_cv_repeats: int = Field(3, ge=1)
+
+    @field_validator("training_cv_folds")
+    @classmethod
+    def _cv_folds(cls, value: int) -> int:
+        if value == 1:
+            raise ValueError("training_cv_folds must be 0 (off) or at least 2")
+        return value
 
     @field_validator("seeds", "candidate_models")
     @classmethod
@@ -377,6 +386,13 @@ class ModelRecord(Outcome):
     model_path: Path | None = None
     val_predictions_path: Path | None = None
     test_predictions_path: Path | None = None
+    threshold: float | None = Field(None, ge=0, le=1)
+    protocol_id: str | None = None
+    selected: bool = False
+    training_rows: int | None = Field(None, ge=1)
+    synthetic_rows: int = Field(0, ge=0)
+    val_metrics: dict[str, float] = Field(default_factory=dict)
+    test_metrics: dict[str, float] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _fill_level_matches_arm(self) -> Self:
@@ -394,6 +410,11 @@ class TrainingOutput(Outcome):
     required_on_success: ClassVar[tuple[str, ...]] = ("records",)
 
     records: list[ModelRecord] = Field(default_factory=list)
+    metrics_path: Path | None = None
+    validation_summary_path: Path | None = None
+    protocol_path: Path | None = None
+    cv_metrics_path: Path | None = None
+    cv_predictions_path: Path | None = None
 
     @model_validator(mode="after")
     def _records_consistent(self) -> Self:

@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agentic_gan.agents.model_selection import run_model_selection
 from agentic_gan.agents.quality import run_quality
+from agentic_gan.agents.training import run_training
 from agentic_gan.schemas import (
     STAGE_IO,
     EvaluationInput,
@@ -61,7 +62,8 @@ def build_graph(agents=None):
     if agents is None:
         agents = default_agents()
         agents[Stage.QUALITY_CHECK] = run_quality
-        # A caller-supplied fixture, including the quality-agent graph test, is left in place.
+        agents[Stage.TRAINING] = run_training
+        # Default to the real selector while preserving explicitly supplied test agents.
         if isinstance(agents[Stage.MODEL_SELECTION], StubAgent):
             agents[Stage.MODEL_SELECTION] = run_model_selection
     if set(agents) != set(Stage):
