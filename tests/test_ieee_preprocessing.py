@@ -216,6 +216,24 @@ def test_training_model_matrix_drops_ieee_join_key_and_split_clock():
     assert target.tolist() == [0, 1]
 
 
+def test_ieee_original_encoder_keeps_high_cardinality_one_hot_sparse():
+    train = pd.DataFrame({
+        "card1": np.arange(1000),
+        "amount": np.linspace(0, 1, 1000),
+    })
+    transformer = baselines._minimal_transformer(
+        train, {"card1"}, sparse_output=True
+    ).fit(train)
+    train_matrix = transformer.transform(train)
+    unseen_matrix = transformer.transform(
+        pd.DataFrame({"card1": [1001], "amount": [0.5]})
+    )
+    assert sparse.issparse(train_matrix)
+    assert sparse.issparse(unseen_matrix)
+    assert train_matrix.shape == (1000, 1001)
+    assert unseen_matrix.shape == (1, 1001)
+
+
 def test_ieee_baseline_protocol_hands_off_to_training(ieee, monkeypatch):
     config, tx, _, config_path, root = ieee
     monkeypatch.setattr(

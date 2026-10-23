@@ -37,18 +37,19 @@ optimistic, so the untouched test split estimates the resulting operating point.
 
 The threshold is model-specific because probability scales differ. Test PR-AUC stays
 threshold-independent. Models rank by validation trapezoidal PR-AUC; test metrics are reported
-for the validation winner only. The CSV orders PR-AUC and F1 first and accuracy last. Optional
-training CV was disabled for this rerun (`cv_folds=0`) to keep the three-dataset baseline
-refresh practical. It can be run separately without changing the threshold protocol.
+for the validation winner only. The CSV orders PR-AUC and F1 first and accuracy last. Training CV was disabled (`cv_folds=0`) for the refreshed baselines. IEEE-CIS uses a
+100k-row stratified sample from the time-based training period; validation and test retain
+their full chronological windows.
 
 ## Measured rerun
 
-The results file contains **24 successful rows: four models × two arms × three datasets**.
-The previous five-model results are retained under `results/archive/v1/` and are not mixed
-with this comparison.
+The three-dataset refresh contributed **24 successful rows: four models × two arms × three
+datasets**. The IEEE-CIS extension below adds eight rows, so `results/baselines.csv` now has
+**32 successful rows across four datasets**. The previous five-model results are retained
+under `results/archive/v1/` and are not mixed with this comparison.
 All runs use seed 42, a 60/20/20 stratified split on Bank, Default, and Polish, and
-training-only preprocessing. Original uses minimum imputation, scaling, and encoding; cleaned
-uses the shared training-fitted cleaner. The exact per-model thresholds are:
+training-only preprocessing. Original uses the generic training-fold imputer, scaling, and
+encoding; cleaned uses the shared training-fitted cleaner. The exact per-model thresholds are:
 
 | Model | Bank | Default | Polish |
 |---|---:|---:|---:|
@@ -72,6 +73,33 @@ Default F1 at 0.5 was 0.4489 versus 0.5222 at the frozen threshold. Lower accura
 Bank and Default accompanies increased minority-class recall; it does not contradict the
 F1 improvement.
 
+## IEEE-CIS time-split extension
+
+IEEE-CIS uses issue #50's fixed `TransactionDT` cutoffs. Its training period contains
+354,322 rows, from which the configured 100,000-row sample (3,383 frauds; 3.38%) is selected.
+Validation and test keep all 118,107 and 118,108 rows (3.90% and 3.44% fraud). The original
+arm keeps the high-cardinality one-hot matrix sparse; the cleaned arm applies the shared
+training-only missingness rules, caps categories at 50 plus missing/other buckets, and adds
+informative missingness flags. Both omit `TransactionID` and `TransactionDT` from features.
+
+The original-arm validation F1 thresholds were frozen once and reused for the cleaned arm:
+
+| Model | IEEE-CIS threshold |
+|---|---:|
+| Gradient boosting | 0.099203 |
+| LightGBM | 0.179973 |
+| CatBoost | 0.165394 |
+| Stacking ensemble | 0.069860 |
+
+| Arm | Validation winner | Threshold | Validation PR-AUC | Test PR-AUC | Test F1 | ROC-AUC | Precision | Recall | Accuracy |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Original | LightGBM | 0.179973 | 0.5744 | 0.4527 | 0.4406 | 0.8785 | 0.4611 | 0.4218 | 0.9631 |
+| Cleaned | LightGBM | 0.179973 | 0.5492 | 0.4093 | 0.3954 | 0.8750 | 0.3670 | 0.4286 | 0.9549 |
+
+LightGBM ranked first on validation in both arms, ahead of CatBoost (0.5557 original,
+0.5282 cleaned). Its test PR-AUC was lower in the later time window. The different fraud
+rates and periods may contribute to that gap; this one split cannot establish the cause.
+
 ## Why rankings differ
 
 - **Bank Marketing:** 3,173 of 27,126 training rows are positive (11.70%). Customer
@@ -92,6 +120,16 @@ F1 improvement.
   isolate localized, nonlinear patterns, which is consistent with its strong ranking here.
   This is an interpretation, not a causal finding. Both arms median-impute and retain
   extreme ratios; neither tests native missing-value routing or missingness indicators.
+- **IEEE-CIS:** The time-based validation period has a 3.90% fraud rate versus 3.44% in test.
+  The 100k training sample includes 7,663 distinct `card1` values, alongside substantial
+  missingness across transaction and identity fields. LightGBM's histogram splits and
+  leaf-wise growth may capture localized fraud interactions in this wide, sparse feature
+  space; CatBoost's symmetric trees split it differently after one-hot encoding. LightGBM's
+  validation PR-AUC lead (0.574 versus 0.556 for CatBoost) did not carry over unchanged to
+  the later test period. This is consistent with time-related distribution change, but the
+  single split does not prove it. Cleaning further groups high-cardinality categories and
+  drops values with over 20% training missingness while preserving flags, which can remove
+  signal as well as noise.
 
 All three boosting methods partition features by thresholds but differ in tree shape, split
 search, and regularization. The stack learns how to combine cross-validated linear and forest
@@ -108,13 +146,14 @@ Run these commands sequentially; they share `results/baselines.csv`:
 python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both --cv-folds 0
 python -m agentic_gan.tools.baselines --dataset default --arm both --cv-folds 0
 python -m agentic_gan.tools.baselines --dataset polish --arm both --cv-folds 0
+python -m agentic_gan.tools.baselines --dataset ieee_cis --arm both --cv-folds 0
 ```
 
 `agents.training` loads the same four models and thresholds from the checked protocol. It does
 not recalibrate on cleaned or synthetic arms. IEEE-CIS preprocessing uses issue #50's time
 split and writes cleaned unencoded and encoded/scaled outputs; its source hash covers both
-transaction and identity files. Freeze a separate IEEE-CIS protocol before running the
-Training Agent on that dataset.
+transaction and identity files. The IEEE-CIS protocol is frozen at
+`results/baseline_protocol_ieee_cis_42_cv0.json` and is ready for the Training Agent.
 
 ## References
 

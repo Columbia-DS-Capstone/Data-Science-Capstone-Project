@@ -418,7 +418,7 @@ class SharedPreprocessor(TransformerMixin, BaseEstimator):
         return self.fitted_.transform(X).to_numpy()
 
 
-def _minimal_transformer(X, discrete, strategy="median"):
+def _minimal_transformer(X, discrete, strategy="median", *, sparse_output=False):
     categorical = [c for c in X if c in discrete or not pd.api.types.is_numeric_dtype(X[c])]
     numeric = [c for c in X if c not in categorical]
     return ColumnTransformer(
@@ -434,11 +434,12 @@ def _minimal_transformer(X, discrete, strategy="median"):
                 "categorical",
                 make_pipeline(
                     SimpleImputer(strategy="most_frequent", keep_empty_features=True),
-                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=sparse_output),
                 ),
                 categorical,
             ),
-        ]
+        ],
+        sparse_threshold=1.0 if sparse_output else 0.3,
     )
 
 
@@ -457,7 +458,10 @@ def prepare_inputs(dataset, arm, root, seed, config_path=None):
         transformer = SharedPreprocessor(config)
     else:
         transformer = _minimal_transformer(
-            data.drop(columns=config.target), config.discrete, config.imputation
+            data.drop(columns=config.target),
+            config.discrete,
+            config.imputation,
+            sparse_output=config.name == "ieee_cis",
         )
     ids = split_dataset(split_source, config)
     frames = [data.loc[ids[name]] for name in ("train", "validation", "test")]

@@ -126,6 +126,7 @@ CatBoost, and stacking. Use Python 3.12 and `uv sync --frozen` first:
 uv run python -m agentic_gan.tools.baselines --dataset default --arm both --cv-folds 0
 uv run python -m agentic_gan.tools.baselines --dataset polish --arm both --cv-folds 0
 uv run python -m agentic_gan.tools.baselines --dataset bank_marketing --arm both --cv-folds 0
+uv run python -m agentic_gan.tools.baselines --dataset ieee_cis --arm both --cv-folds 0
 ```
 
 Run these commands sequentially because they share `results/baselines.csv`. On the first
