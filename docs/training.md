@@ -31,14 +31,17 @@ the frozen protocol, allowing a validation-only
 protocol (`cv_folds=0`) when full-data cross-validation is too costly. IEEE-CIS uses that
 setting for its 100k-row training sample. Override the path with
 `RunConfig.training_protocol_path` or the `protocol_path=` keyword.
-Each dataset needs its own original-arm reference. After IEEE-CIS preprocessing, run this
-to freeze its validation F1 thresholds before training:
+Each dataset needs its own original-arm reference. IEEE-CIS now has a frozen original-arm
+protocol at `results/baseline_protocol_ieee_cis_42_cv0.json`. Run this command to check both
+arms against its saved thresholds or to create the protocol in a fresh results folder:
 
 ```bash
 python -m agentic_gan.tools.baselines --dataset ieee_cis --arm both --cv-folds 0
 ```
 
-The training agent reports this setup step if the protocol is missing.
+The training agent reports this setup step if the protocol is missing. The IEEE-CIS
+original arm keeps one-hot matrices sparse so high-cardinality payment fields fit within
+memory; vocabulary fitting still uses training rows only.
 The models are gradient boosting, LightGBM, CatBoost, and stacking.
 `candidate_models` must match that complete suite. No tuning or probability
 calibration occurs here; feature exclusions, changed splits, or changed settings
@@ -55,7 +58,7 @@ with a different split seed.
 
 | Schema arm | Results label | Training rows |
 |---|---|---|
-| `raw` | `original` | Raw real train, with the frozen minimum imputation/encoding/scaling |
+| `raw` | `original` | Raw real train, with training-fitted imputation/encoding/scaling |
 | `baseline` | `cleaned` | Cleaned real train |
 | `smote` | `smotenc` | Cleaned real train plus SMOTENC rows at each configured fill level |
 | `gan` | `ctgan` | Cleaned real train plus each quality-accepted synthetic set |

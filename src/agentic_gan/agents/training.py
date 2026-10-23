@@ -51,7 +51,10 @@ class ArmEncoder(TransformerMixin, BaseEstimator):
         self.fit_rows_ = len(data)
         if self.original:
             self.encoder_ = baselines._minimal_transformer(
-                data, self.config.discrete, self.config.imputation
+                data,
+                self.config.discrete,
+                self.config.imputation,
+                sparse_output=self.config.name == "ieee_cis",
             ).fit(data)
         else:
             data[self.config.target] = np.asarray(y)[real]
