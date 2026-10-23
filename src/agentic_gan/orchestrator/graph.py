@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
+from agentic_gan.agents.model_selection import run_model_selection
 from agentic_gan.agents.quality import run_quality
 from agentic_gan.schemas import (
     STAGE_IO,
@@ -29,7 +30,7 @@ from agentic_gan.utils.datasets import DATASETS
 from .decisions import log_decision
 from .manifest import Manifest, RunDir, create_run
 from .state import RunState
-from .stubs import default_agents
+from .stubs import StubAgent, default_agents
 
 
 class PipelineState(TypedDict, total=False):
@@ -60,10 +61,13 @@ def build_graph(agents=None):
     if agents is None:
         agents = default_agents()
         agents[Stage.QUALITY_CHECK] = run_quality
+        # A caller-supplied fixture, including the quality-agent graph test, is left in place.
+        if isinstance(agents[Stage.MODEL_SELECTION], StubAgent):
+            agents[Stage.MODEL_SELECTION] = run_model_selection
     if set(agents) != set(Stage):
         raise ValueError("provide one agent for every stage")
 
-    def execute(stage, request, state):
+    def execute(stage, request, state, *, accept_skipped=False):
         run = state["run"]
         run_state = state["run_state"]
         manifest = state["manifest"]
@@ -72,6 +76,23 @@ def build_graph(agents=None):
             run_state.save(run.state_path)
             try:
                 result = STAGE_IO[stage][1].model_validate(agents[stage](request, run))
+                if result.status is Status.SKIPPED and accept_skipped:
+                    if stage is not Stage.MODEL_SELECTION:
+                        raise ValueError("only model selection may return SKIPPED")
+                    next_manifest = manifest.register(run, stage, result)
+                    next_manifest.save(run)
+                    run_state = run_state.finish(stage, Status.SKIPPED, result.reason)
+                    run_state = run_state.skip(Stage.QUALITY_CHECK, result.reason)
+                    run_state = run_state.with_gan(False, result.reason)
+                    run_state.save(run.state_path)
+                    log_decision(
+                        "orchestrator", "selection_skipped",
+                        {"stage": stage.value, "attempt": run_state.attempts(stage)},
+                        "SKIPPED", result.reason, run=run,
+                    )
+                    return {
+                        "run_state": run_state, "manifest": next_manifest, stage.value: result,
+                    }
                 if result.status is not Status.SUCCESS:
                     raise ValueError(f"{stage.value} returned {result.status}: {result.reason}")
                 next_manifest = manifest.register(run, stage, result)
@@ -108,7 +129,7 @@ def build_graph(agents=None):
         result = execute(Stage.MODEL_SELECTION, ModelSelectionInput(
             config=state["config"], preprocess=state["preprocessing"],
             attempt=attempt, previous_report=previous,
-        ), state)
+        ), state, accept_skipped=True)
         return {**result, "selection_attempt": attempt}
 
     def quality_check(state):
@@ -136,9 +157,9 @@ def build_graph(agents=None):
         return {**result, "run_state": run_state}
 
     def training(state):
-        quality = state["quality_check"]
+        quality = state.get("quality_check")
         accepted = []
-        if quality.verdict is Verdict.PASS:
+        if quality is not None and quality.verdict is Verdict.PASS:
             accepted = [item for item in state["model_selection"].synthetic_sets
                         if item.fill_level in quality.passing_levels]
         return execute(Stage.TRAINING, TrainingRequest(
@@ -150,7 +171,7 @@ def build_graph(agents=None):
         run = state["run"]
         return execute(Stage.EVALUATION, EvaluationInput(
             config=state["config"], training=state["training"],
-            quality=state["quality_check"],
+            quality=state.get("quality_check"),
             treatment_log_path=state["preprocessing"].treatment_log_path,
             decision_log_path=run.decisions_path, manifest_path=run.manifest_path,
             state_path=run.state_path,
@@ -167,6 +188,13 @@ def build_graph(agents=None):
 
     def route(next_stage):
         return lambda state: "partial_report" if state["run_state"].failed_stage else next_stage
+
+    def after_model_selection(state):
+        if state["run_state"].failed_stage:
+            return "partial_report"
+        if state["run_state"].status(Stage.MODEL_SELECTION) is Status.SKIPPED:
+            return "training"
+        return "quality_check"
 
     def after_quality(state):
         if state["run_state"].failed_stage:
@@ -189,11 +217,14 @@ def build_graph(agents=None):
     for current, following in (
         ("split", "preprocessing"),
         ("preprocessing", "model_selection"),
-        ("model_selection", "quality_check"),
         ("training", "evaluation"),
         ("evaluation", END),
     ):
         graph.add_conditional_edges(current, route(following), [following, "partial_report"])
+    graph.add_conditional_edges(
+        "model_selection", after_model_selection,
+        ["quality_check", "training", "partial_report"],
+    )
     graph.add_conditional_edges(
         "quality_check", after_quality,
         ["training", "model_selection", "partial_report"],
