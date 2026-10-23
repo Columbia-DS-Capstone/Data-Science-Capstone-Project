@@ -163,6 +163,7 @@ def sample_synthetic(
     drop_duplicates_of: pd.DataFrame | None = None,
     row_filter: Callable[[pd.DataFrame], pd.Series] | None = None,
     max_rounds: int = 20,
+    conditional: bool = True,
 ) -> pd.DataFrame:
     """Return exactly ``n`` synthetic rows of ``target_col == target_value`` with is_synthetic=1.
 
@@ -174,6 +175,8 @@ def sample_synthetic(
     is given (e.g. the real training split, same columns), rows that exactly copy a real
     row or an earlier synthetic row are dropped and resampled, up to ``max_rounds``.
     CTGAN's conditioning is soft, so rows with the wrong target value are also dropped.
+    ``conditional=False`` samples without asking for the target value and keeps the matching
+    rows, which shows whether the conditioning itself skews other columns.
     """
     if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
         raise ValueError("n must be a positive integer")
@@ -191,9 +194,12 @@ def sample_synthetic(
         # Size each draw from the share of rows that survive so far (1.0 until measured).
         match_rate = max(usable / drawn, 0.02) if drawn else 1.0
         request = min(int(need / match_rate * 1.2) + 10, 100_000)
-        batch = model.model.sample(
-            request, condition_column=model.target_col, condition_value=target_value,
-        )
+        if conditional:
+            batch = model.model.sample(
+                request, condition_column=model.target_col, condition_value=target_value,
+            )
+        else:
+            batch = model.model.sample(request)
         drawn += len(batch)
         batch = _restore_dtypes(batch[model.columns].reset_index(drop=True), model)
         batch = batch[batch[model.target_col] == target_value].reset_index(drop=True)
