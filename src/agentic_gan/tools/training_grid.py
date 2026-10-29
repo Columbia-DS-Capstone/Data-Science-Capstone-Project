@@ -112,6 +112,30 @@ def check_no_synthetic_in_holdouts(result: TrainingOutput) -> dict[str, int]:
     return counts
 
 
+def save_results(
+    result: TrainingOutput, dataset: str, seeds: list[int], seconds: float, out_dir: Path
+) -> None:
+    """Replace this dataset's rows in the results table and its line in the run-time table."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics = pd.read_csv(result.metrics_path)
+    paths = (out_dir / "training_all_arms.csv", out_dir / "training_run_times.csv")
+    times = pd.DataFrame(
+        [
+            {
+                "dataset": dataset,
+                "seeds": len(seeds),
+                "model_fits": len(result.records),
+                "seconds": round(seconds, 1),
+            }
+        ]
+    )
+    for path, new in zip(paths, (metrics, times), strict=True):
+        if path.exists():
+            old = pd.read_csv(path)
+            new = pd.concat([old[old["dataset"] != dataset], new], ignore_index=True)
+        new.to_csv(path, index=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="bank_marketing", choices=sorted(DATASETS))
@@ -119,6 +143,8 @@ def main() -> None:
     parser.add_argument("--fill-levels", type=float, nargs="+", default=list(FILL_LEVELS))
     parser.add_argument("--ctgan-prefix", help="path prefix of the CTGAN files, up to the level")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runs")
+    parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
+    parser.add_argument("--no-save", action="store_true", help="do not update results/")
     args = parser.parse_args()
 
     request, run = build_request(
@@ -128,6 +154,10 @@ def main() -> None:
     result = run_training(request, run)
     seconds = time.perf_counter() - start
     leaked = check_no_synthetic_in_holdouts(result)
+    if any(leaked.values()):
+        raise SystemExit(f"synthetic rows reached validation/test: {leaked}")
+    if not args.no_save:
+        save_results(result, args.dataset, args.seeds, seconds, args.results_dir)
 
     print(f"status: {result.status.value}  fits: {len(result.records)}  run time: {seconds:.0f}s")
     print(f"synthetic rows in validation/test predictions: {leaked}")
