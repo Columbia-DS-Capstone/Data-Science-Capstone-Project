@@ -145,3 +145,58 @@ Tests in `tests/test_training_agent.py` cover all arm/level/seed combinations,
 frozen thresholds, serialization and manifest registration, provenance rejection,
 failure propagation, deterministic reruns, fold-local generation, a real four-model
 smoke run, and the orchestrator's filtering of quality-rejected fill levels.
+
+## Running every arm on every dataset
+
+`tools/training_grid.py` builds a run folder and a `TrainingRequest` from the files that
+already exist (the raw source, the cleaned splits in `data/interim/<dataset>/`, and optionally
+CTGAN files), calls `run_training`, and updates two tables in `results/`. It stops with an
+error if any saved validation or test prediction file contains a synthetic row.
+
+```bash
+uv run python -m agentic_gan.tools.training_grid --dataset default
+uv run python -m agentic_gan.tools.training_grid --dataset bank_marketing \
+    --ctgan-prefix data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill
+```
+
+`--ctgan-prefix` plus the fill level as a whole percent plus `.csv` names each CTGAN file
+(`..._fill10.csv`, `_fill25`, `_fill50`). Without it the CTGAN arm is not run. Each run
+replaces its own dataset's rows, so a dataset can be rerun without touching the others. Use
+`--seeds` for a quicker run, and `--no-save` to leave `results/` alone.
+
+Outputs: `results/training_all_arms.csv` (the `metrics.csv` rows of every run) and
+`results/training_run_times.csv`. Run times below are 5 seeds on a laptop CPU, which includes
+fitting every model for every arm.
+
+| Dataset | Model fits | Run time |
+|---|---|---|
+| Bank Marketing (with CTGAN v2) | 160 | 206 s |
+| Default | 100 | 90 s |
+| Polish | 100 | 177 s |
+
+Coverage:
+
+| Dataset | original | cleaned | SMOTENC | CTGAN |
+|---|---|---|---|---|
+| Bank Marketing | run | run | run | run (v2 files) |
+| Default | run | run | run | pending #55 |
+| Polish | run | run | run | pending #55 |
+| IEEE-CIS | not run | not run | not run | not run |
+
+IEEE-CIS needs its local files (not in git) and the runner does not build its request yet.
+CTGAN for Default and Polish is produced by #55; when its files exist, rerun those two
+datasets with `--ctgan-prefix`.
+
+Test PR-AUC of each seed's validation winner, mean over 5 seeds (the models and thresholds
+are the frozen ones, so these differ from the #35 comparison, which used a fixed cutoff of
+0.5 and its own provisional models):
+
+| Dataset | original | cleaned | SMOTENC 10 / 25 / 50% | CTGAN 10 / 25 / 50% |
+|---|---|---|---|---|
+| Bank Marketing | 0.464 | 0.478 | 0.459 / 0.449 / 0.438 | 0.476 / 0.466 / 0.448 |
+| Default | 0.558 | 0.564 | 0.560 / 0.558 / 0.552 | not run |
+| Polish | 0.835 | 0.835 | 0.815 / 0.809 / 0.793 | not run |
+
+Adding synthetic rows does not beat the cleaned arm on any dataset, and more rows lower
+PR-AUC. On Polish the original and cleaned arms give identical results, because the cleaning
+changes nothing there.
