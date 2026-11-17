@@ -82,6 +82,44 @@ def test_verified_narrative_tools_and_registered_artifacts(experiment):
     assert run.load_manifest().register(run, Stage.EVALUATION, result).verify(run) == []
 
 
+def test_fewer_than_three_seeds_get_bootstrap_verdicts_with_intervals(experiment):
+    request, run = experiment  # two seeds, so the seed-spread rule cannot decide
+    result = evaluation.run_evaluation(request, run, client=FakeLLM([answer()]))
+
+    assert result.status is Status.SUCCESS and result.numbers_verified
+    tables = {p.stem: p for p in result.metrics_table_paths}
+    comparison = pd.read_csv(tables["comparisons"])
+    scored = comparison[
+        comparison.arm.ne(comparison.reference) & comparison.metric.isin(["pr_auc", "roc_auc"])
+    ]
+    assert scored.boot_lo.notna().all() and (scored.boot_lo <= scored.boot_hi).all()
+    assert (scored.boot_seed == 42).all()  # the bootstrap uses the lowest seed
+    evidence = json.loads(tables["evidence"].read_text())
+    assert {verdict["basis"] for verdict in evidence["verdicts"]} == {"paired bootstrap"}
+    assert "not enough paired seeds" not in {verdict["verdict"] for verdict in evidence["verdicts"]}
+    report = result.report_path.read_text()
+    assert "boot_lo" in report and "paired bootstrap" in report
+
+
+def test_missing_scores_are_logged_and_the_report_still_completes(experiment, monkeypatch):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("no score file")
+
+    monkeypatch.setattr(evaluation.evaluation_tools, "load_selected_scores", missing)
+    request, run = experiment
+
+    result = evaluation.run_evaluation(request, run, client=FakeLLM([answer()]))
+
+    assert result.status is Status.SUCCESS and result.numbers_verified
+    decisions = read_decisions(run)
+    (step,) = decisions[decisions.rule.eq("bootstrap")].itertuples()
+    assert step.outcome == "UNAVAILABLE" and "no score file" in step.rationale
+    evidence = json.loads(
+        next(p for p in result.metrics_table_paths if p.stem == "evidence").read_text()
+    )
+    assert {verdict["verdict"] for verdict in evidence["verdicts"]} == {"not enough paired seeds"}
+
+
 def test_made_up_number_rejected_then_regenerated_once(experiment):
     request, run = experiment
     fake = FakeLLM(

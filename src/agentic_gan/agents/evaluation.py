@@ -36,13 +36,16 @@ FALLBACK = Narrative(
     summary="The tables compare validation-selected models on held-out real rows. They show "
     "PR-AUC, AUROC, F1 and accuracy, with random baselines where defined.",
     improvements="Read the deterministic verdict table for gains over each named reference. "
-    "A gain is descriptive evidence under the configured seed-spread rule, not a causal claim.",
+    "A gain is descriptive evidence under the configured rule (seed spread, or a paired "
+    "bootstrap when fewer than three seeds are available), not a causal claim.",
     segments="The segment table describes available groups. Missing segment data does not "
     "establish fairness; small groups cannot support strong conclusions about who benefits.",
     negative_results="Losses, inconclusive comparisons and insufficient paired seeds are "
     "reported explicitly below. Absence of a reliable gain is not evidence of equivalence.",
-    limitations="Seed-to-seed spread is not a confidence interval. Small test sets and rare "
-    "positive outcomes limit precision. Test results must not select models or fill levels. "
+    limitations="Seed-to-seed spread is not a confidence interval. A bootstrap interval covers "
+    "only the sampling noise of the evaluation rows, not model or generator randomness. Small "
+    "test sets and rare positive outcomes limit precision. Test results must not select models "
+    "or fill levels. "
     "Segment results are exploratory and do not establish equitable deployment performance.",
 )
 
@@ -82,7 +85,13 @@ def _records(request, state):
     )
 
 
-def _comparisons(metrics):
+def _models_dir(request, run):
+    """The training agent's models folder, where each model's saved scores are."""
+    path = request.training.metrics_path
+    return (run.root / path).parent if path else run.root / "models"
+
+
+def _comparisons(metrics, models_dir=None):
     tables, verdicts = [], []
     references = [("original", metrics), ("cleaned", metrics)]
     for level in metrics.loc[metrics.arm.eq("smotenc"), "fill_level"].unique():
@@ -90,7 +99,9 @@ def _comparisons(metrics):
     for reference, subset in references:
         if not subset.arm.eq(reference).any():
             continue
-        comparison = evaluation_tools.compare_arms(subset, reference=reference)
+        comparison = evaluation_tools.compare_arms(
+            subset, reference=reference, models_dir=models_dir
+        )
         comparison["reference"] = reference
         tables.append(comparison)
         groups = comparison.loc[
@@ -123,6 +134,9 @@ def _comparisons(metrics):
             ]
         )
     )
+    for column in ("boot_lo", "boot_hi"):  # the bootstrap interval, when the scores were found
+        if column not in comparison:
+            comparison[column] = np.nan
     return comparison, verdicts
 
 
@@ -260,7 +274,7 @@ def _render(narrative, comparison, verdicts, counts, evidence):
     negative = (
         verdict_table[verdict_table.verdict.ne("reliable gain")] if verdicts else verdict_table
     )
-    verdict_columns = ["arm", "reference", "fill_level", "metric", "verdict"]
+    verdict_columns = ["arm", "reference", "fill_level", "metric", "verdict", "basis"]
     status = (
         "Unavailable; see the recorded reason in run state."
         if (evidence["gan_available"] is False)
@@ -303,6 +317,8 @@ def _render(narrative, comparison, verdicts, counts, evidence):
                         "n_paired",
                         "diff_mean",
                         "diff_sd",
+                        "boot_lo",
+                        "boot_hi",
                     ],
                 ),
                 _table(verdict_table.replace({"metric": METRIC_LABELS}), verdict_columns),
@@ -330,7 +346,7 @@ def _render(narrative, comparison, verdicts, counts, evidence):
                     ["arm", "fill_level", "seed", "test_rows", "positives", "small_test"],
                 ),
                 "Comparisons use validation-selected models, which can differ between arms. "
-                "The tool's seed-spread rule is not a statistical significance test. "
+                "The tool's seed-spread and bootstrap rules are not significance tests. "
                 "SHAP analysis is not supplied by the available evaluation tools.",
                 "## Quality and augmentation availability",
                 status,
@@ -365,7 +381,20 @@ def run_evaluation(request: EvaluationInput, run: RunDir, *, client=None) -> Eva
         next_action="verify report numbers",
     )
     metrics = _records(request, state)
-    comparison, verdicts = _comparisons(metrics)
+    models_dir = _models_dir(request, run)
+    try:
+        comparison, verdicts = _comparisons(metrics, models_dir)
+    except (FileNotFoundError, ValueError) as error:
+        # Without the saved scores a run with fewer than three seeds has no bootstrap verdicts.
+        log_decision(
+            "evaluation",
+            "bootstrap",
+            {"models_dir": str(models_dir)},
+            "UNAVAILABLE",
+            f"{type(error).__name__}: {error}",
+            run=run,
+        )
+        comparison, verdicts = _comparisons(metrics)
     segments, counts, positive_rates = _segments_and_counts(request, run, state)
     comparison = _with_random_baselines(comparison, positive_rates)
     evidence = {
@@ -388,6 +417,7 @@ def run_evaluation(request: EvaluationInput, run: RunDir, *, client=None) -> Eva
         ],
         "rules": {
             "min_seeds": evaluation_tools.MIN_SEEDS,
+            "n_boot": evaluation_tools.N_BOOT,
             "small_test_positives": SMALL_TEST_POSITIVES,
         },
         "audit_paths": {
@@ -440,6 +470,8 @@ def run_evaluation(request: EvaluationInput, run: RunDir, *, client=None) -> Eva
         rules = {
             "config": run.load_config().model_dump(mode="json"),
             "min_seeds": evaluation_tools.MIN_SEEDS,
+            "n_boot": evaluation_tools.N_BOOT,
+            "bootstrap_alpha": evaluation_tools.BOOTSTRAP_ALPHA,
             "metrics": evaluation_tools.METRICS,
             "reference": evaluation_tools.REFERENCE_ARM,
             "max_categories": evaluation_tools.MAX_CATEGORIES,

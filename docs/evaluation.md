@@ -59,17 +59,43 @@ in the limitations section; they do not enter selected-model comparisons.
 All files are written under `report/` and returned for manifest registration:
 
 - `metrics.csv`: the training handoff's reported metrics, including selection/status.
-- `comparisons.csv`: means, seed spread, paired differences by reference arm, and split baselines.
+- `comparisons.csv`: means, seed spread, paired differences by reference arm, bootstrap
+  intervals (`boot_*`) and split baselines.
 - `segments.csv`: per-model, per-seed segment metrics and small-group flags.
 - `evidence.json`: deterministic verdicts, test counts, rule constants and audit context.
 - `final_report.md`: verified narrative, comparison/verdict tables and caveats.
 
 The available #75 tools cover PR-AUC, F1, precision, recall, seed-based comparisons,
 segments and number checking. They do not supply SHAP analysis, calibration analysis
-or PDF export; the agent does not claim to have computed those. The reliable-gain rule
-uses paired mean PR-AUC lift versus seed-to-seed spread on both validation and test,
-with at least three paired seeds. This is descriptive evidence, not a confidence interval
-or significance test. Selected models may differ across arms.
+or PDF export; the agent does not claim to have computed those. With at least three paired
+seeds the reliable-gain rule compares the paired mean PR-AUC lift with the seed-to-seed spread
+on both validation and test. With fewer (one seed, 42, is the default) it uses the paired
+bootstrap described below. Neither is a significance test. Selected models may differ across
+arms.
+
+## Uncertainty with one seed
+
+Every experiment uses one seed (42), so arm comparisons take their uncertainty from a paired
+bootstrap over the rows of each evaluation split (`paired_bootstrap` in `tools/evaluation.py`):
+
+- Each resample draws the positive rows, and the negative rows, with replacement, so the class
+  counts never change, and scores both arms on the same drawn rows. There are 1,000 resamples.
+- The interval is the 2.5th and 97.5th percentiles of the metric difference (arm minus
+  reference). `compare_arms` adds it to `comparisons.csv` as `boot_diff`, `boot_lo` and
+  `boot_hi` for PR-AUC and AUROC, with the model seed it used (`boot_seed`, the lowest seed
+  both arms share).
+- Verdict: a gain if the interval's lower bound is above 0 on both validation and test, a loss if
+  its upper bound is below 0 on both, otherwise inconclusive. The verdict table names the rule
+  that decided (`basis`).
+- The scores come from each selected model's saved prediction files (`load_selected_scores`).
+  If they are missing the verdict stays "not enough paired seeds" and the run logs a `bootstrap`
+  decision.
+
+**Limits to state in the paper.** The bootstrap covers the sampling noise of the evaluation
+rows: a different draw of customers from the same population. It does not cover the randomness
+of model training or of the generator, because both are fixed at seed 42, and it does not cover
+the choice of split. A seed-to-seed spread measures training randomness, which is a different
+thing, and it is no longer the default.
 
 Number verification establishes that numeric tokens occur in the result artifacts,
 with the tool's rounding/percentage conventions. It does not prove that every prose
