@@ -142,7 +142,7 @@ def save_results(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="bank_marketing", choices=sorted(DATASETS))
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42])
     parser.add_argument("--fill-levels", type=float, nargs="+", default=list(FILL_LEVELS))
     parser.add_argument("--ctgan-prefix", help="path prefix of the CTGAN files, up to the level")
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runs")

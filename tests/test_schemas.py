@@ -226,7 +226,7 @@ def test_config_defaults():
     )
     assert config.fill_levels == [0.10]
     assert config.max_attempts == 3
-    assert len(config.seeds) == 5
+    assert config.seeds == [42]
 
 
 def test_config_yaml_round_trip():

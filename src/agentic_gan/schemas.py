@@ -129,7 +129,9 @@ class RunConfig(Schema):
     excluded_features: list[str] = Field(default_factory=list)
     split_ratios: SplitRatios = Field(default_factory=SplitRatios)
     split_seed: int = 42
-    seeds: list[int] = Field(default_factory=lambda: [42, 43, 44, 45, 46], min_length=1)
+    # One model seed by default (issue 138): arm comparisons take their uncertainty from a paired
+    # bootstrap over the evaluation rows. List more seeds for a multi-seed run.
+    seeds: list[int] = Field(default_factory=lambda: [42], min_length=1)
     # One fill level by default. In results/cross_dataset.csv (4 datasets, SMOTENC and CTGAN)
     # 10% was the best of 10, 25 and 50% for 7 of 8 dataset and arm pairs, and the loss against
     # the cleaned baseline grew with every step up. List several levels to sweep them.

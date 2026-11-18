@@ -7,11 +7,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import roc_auc_score
 
-from agentic_gan.agents.training import _save_metrics
+import agentic_gan.tools.evaluation as evaluation_module
+from agentic_gan.agents.training import _save_metrics, model_artifact_stem
 from agentic_gan.schemas import Arm, ModelRecord, Status
+from agentic_gan.tools.baselines import pr_auc_score
 from agentic_gan.tools.evaluation import (
+    BootstrapResult,
     compare_arms,
+    load_selected_scores,
+    paired_bootstrap,
     reliable_gain,
     segment_metrics,
     verify_report_numbers,
@@ -224,6 +230,235 @@ def test_comparison_reads_the_training_agents_own_metrics_file(tmp_path):
     assert pick(table, "ctgan", 0.25, "test", "roc_auc")["mean"] == pytest.approx(0.8)
     assert pick(table, "ctgan", 0.25, "test", "accuracy")["mean"] == pytest.approx(0.85)
     assert reliable_gain(table, dataset="bank_marketing", arm="ctgan", fill_level=0.25).reliable
+
+
+# --- paired bootstrap (issue 138) --------------------------------------------------------------
+
+
+def labelled(n=600, rate=0.2, seed=0):
+    rng = np.random.default_rng(seed)
+    return (rng.random(n) < rate).astype(int), rng
+
+
+def informative(y, rng, strength):
+    """Scores in [0, 1] that put the positives higher the larger `strength` is."""
+    return np.clip(rng.random(len(y)) * 0.6 + strength * y, 0, 1)
+
+
+def test_identical_scores_have_no_difference_and_an_interval_around_zero():
+    y, rng = labelled()
+    scores = informative(y, rng, 0.3)
+    for metric in ("pr_auc", "roc_auc"):
+        result = paired_bootstrap(y, scores, scores, metric=metric, n_boot=100)
+        assert result == BootstrapResult(diff=0.0, lo=0.0, hi=0.0, n_boot=100)
+
+
+def test_scores_built_from_the_labels_beat_random_scores_with_a_positive_interval():
+    y, rng = labelled()
+    good, random = informative(y, rng, 0.4), rng.random(len(y))
+    for metric in ("pr_auc", "roc_auc"):
+        result = paired_bootstrap(y, random, good, metric=metric, n_boot=200)
+        assert 0 < result.lo < result.diff < result.hi
+        worse = paired_bootstrap(y, good, random, metric=metric, n_boot=200)
+        assert worse.hi < 0 and worse.diff == pytest.approx(-result.diff)
+
+
+def test_the_same_seed_reproduces_the_result_and_another_seed_moves_the_interval():
+    y, rng = labelled()
+    base, other = informative(y, rng, 0.2), informative(y, rng, 0.25)
+    first = paired_bootstrap(y, base, other, n_boot=100, seed=7)
+    assert first == paired_bootstrap(y, base, other, n_boot=100, seed=7)
+    again = paired_bootstrap(y, base, other, n_boot=100, seed=8)
+    assert again.diff == first.diff and (again.lo, again.hi) != (first.lo, first.hi)
+
+
+def test_misaligned_or_unusable_inputs_raise():
+    y, rng = labelled(n=100)
+    a, b = rng.random(100), rng.random(100)
+    for args in ((y[:-1], a, b), (y, a[:-1], b), (y, a, b[:-1])):
+        with pytest.raises(ValueError, match="aligned"):
+            paired_bootstrap(*args)
+    with pytest.raises(ValueError, match="both classes"):
+        paired_bootstrap(np.zeros(100, dtype=int), a, b)
+    with pytest.raises(ValueError, match="finite"):
+        paired_bootstrap(y, np.where(np.arange(100) == 3, np.nan, a), b)
+    with pytest.raises(ValueError, match="metric"):
+        paired_bootstrap(y, a, b, metric="f1")
+    with pytest.raises(ValueError, match="alpha"):
+        paired_bootstrap(y, a, b, alpha=1.5)
+
+
+def test_class_counts_stay_fixed_in_every_resample(monkeypatch):
+    y, rng = labelled(n=200, rate=0.1)
+    seen = []
+    area = evaluation_module._Ranked.area
+
+    def spy(self, counts, metric):
+        weights = counts[:, self.order]
+        seen.append(
+            ((weights * self.positive).sum(axis=1), (weights * ~self.positive).sum(axis=1), counts)
+        )
+        return area(self, counts, metric)
+
+    monkeypatch.setattr(evaluation_module._Ranked, "area", spy)
+    paired_bootstrap(y, rng.random(200), rng.random(200), n_boot=40)
+
+    positives = np.concatenate([drawn for drawn, _, _ in seen])
+    negatives = np.concatenate([drawn for _, drawn, _ in seen])
+    assert (positives == y.sum()).all() and (negatives == (1 - y).sum()).all()
+    assert len({tuple(row) for row in seen[0][2]}) > 1  # the resamples differ from each other
+
+
+@pytest.mark.parametrize("metric", ["pr_auc", "roc_auc"])
+def test_the_fast_resampling_matches_scoring_every_resample_with_sklearn(metric):
+    y, rng = labelled(n=300, rate=0.15)
+    base = np.round(informative(y, rng, 0.2), 2)  # rounded, so many scores are tied
+    other = np.round(informative(y, rng, 0.35), 2)
+    score = pr_auc_score if metric == "pr_auc" else roc_auc_score
+    # The same draws as paired_bootstrap: the positives, then the negatives, one resample at a time.
+    draws = np.random.default_rng(3)
+    positives, negatives = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
+    diffs = []
+    for _ in range(60):
+        rows = np.concatenate(
+            [
+                positives[draws.integers(0, len(positives), len(positives))],
+                negatives[draws.integers(0, len(negatives), len(negatives))],
+            ]
+        )
+        diffs.append(score(y[rows], other[rows]) - score(y[rows], base[rows]))
+    lo, hi = np.quantile(diffs, [0.025, 0.975])
+
+    result = paired_bootstrap(y, base, other, metric=metric, n_boot=60, seed=3)
+
+    assert (result.lo, result.hi) == pytest.approx((lo, hi), abs=1e-12)
+    assert result.diff == pytest.approx(score(y, other) - score(y, base))
+
+
+ARMS = {"original": Arm.RAW, "cleaned": Arm.BASELINE, "smotenc": Arm.SMOTE, "ctgan": Arm.GAN}
+EVAL_ROWS = {"validation": 700, "test": 800}
+# How informative each arm's scores are on each split (larger means better).
+STRENGTH = {
+    ("original", 0.0): {"validation": 0.15, "test": 0.15},
+    ("ctgan", 0.25): {"validation": 0.30, "test": 0.30},  # better on both splits
+    ("smotenc", 0.25): {"validation": 0.02, "test": 0.02},  # worse on both splits
+    ("smotenc", 0.5): {"validation": 0.15, "test": 0.15},  # the same quality as the original
+    ("ctgan", 0.5): {"validation": 0.30, "test": 0.15},  # better on validation only
+}
+
+
+def fabricated_run(folder, seeds=(42,)):
+    """A metrics table and the score files for it, as the training agent saves them."""
+    rng = np.random.default_rng(5)
+    labels = {split: (rng.random(n) < 0.2).astype(int) for split, n in EVAL_ROWS.items()}
+    rows = []
+    for seed in seeds:
+        for (arm, level), strengths in STRENGTH.items():
+            for split, strength in strengths.items():
+                y = labels[split]
+                probability = informative(y, rng, strength)
+                stem = model_artifact_stem(ARMS[arm], level, seed, "CatBoost")
+                scores = pd.DataFrame(
+                    {"source_row": np.arange(len(y)), "y_true": y, "probability": probability}
+                )
+                scores.sample(frac=1, random_state=seed).to_csv(
+                    folder / f"{stem}_{split}.csv", index=False
+                )
+                # A second model that lost on validation has no score files: it must not be read.
+                for model, selected, pr_auc in (
+                    ("CatBoost", True, pr_auc_score(y, probability)),
+                    ("LightGBM", False, 0.99),
+                ):
+                    rows.append(
+                        {
+                            "dataset": "bank_marketing",
+                            "arm": arm,
+                            "fill_level": level,
+                            "seed": seed,
+                            "model": model,
+                            "split": split,
+                            "status": "SUCCESS",
+                            "selected": selected,
+                            "pr_auc": pr_auc,
+                            "roc_auc": roc_auc_score(y, probability) if selected else 0.99,
+                            "f1": 0.3,
+                            "accuracy": 0.8,
+                            "precision": 0.3,
+                            "recall": 0.3,
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def test_selected_scores_come_from_the_selected_model_sorted_by_source_row(tmp_path):
+    metrics = fabricated_run(tmp_path)
+
+    scores = load_selected_scores(
+        tmp_path, metrics, arm="ctgan", fill_level=0.25, seed=42, split="test"
+    )
+
+    assert list(scores.columns) == ["source_row", "y_true", "probability"]
+    assert scores["source_row"].tolist() == list(range(EVAL_ROWS["test"]))
+    with pytest.raises(ValueError, match="expected one selected model"):
+        load_selected_scores(tmp_path, metrics, arm="ctgan", fill_level=0.75, seed=42, split="test")
+    with pytest.raises(ValueError, match="unknown arm"):
+        load_selected_scores(tmp_path, metrics, arm="raw", fill_level=0.0, seed=42, split="test")
+
+
+@pytest.mark.parametrize(
+    ("arm", "level", "verdict"),
+    [
+        ("ctgan", 0.25, "reliable gain"),  # the interval is above 0 on both splits
+        ("smotenc", 0.25, "reliable loss"),  # and below 0 on both splits
+        ("smotenc", 0.5, "inconclusive"),  # the same quality: the interval holds 0
+        ("ctgan", 0.5, "inconclusive"),  # better on validation only
+    ],
+)
+def test_one_seed_verdicts_come_from_the_bootstrap_on_both_splits(tmp_path, arm, level, verdict):
+    metrics = fabricated_run(tmp_path)
+
+    table = compare_arms(metrics, models_dir=tmp_path, n_boot=200)
+    result = reliable_gain(table, dataset="bank_marketing", arm=arm, fill_level=level)
+
+    assert result.verdict == verdict and result.basis == "paired bootstrap"
+    for split in ("validation", "test"):
+        row = pick(table, arm, level, split)
+        assert row.n_paired == 1 and row.boot_seed == 42 and row.n_boot == 200
+        assert row.boot_diff == pytest.approx(row.diff_mean)  # the scores reproduce the metrics
+        assert result.lift[split] == pytest.approx(row.diff_mean)
+        assert result.interval[split] == pytest.approx((row.boot_lo, row.boot_hi))
+    reference = pick(table, "original", 0.0, "test")
+    assert pd.isna(reference.boot_lo) and pd.isna(reference.boot_diff)
+
+
+def test_without_scores_one_seed_still_has_no_verdict(tmp_path):
+    table = compare_arms(fabricated_run(tmp_path))
+    result = reliable_gain(table, dataset="bank_marketing", arm="ctgan", fill_level=0.25)
+    assert result.verdict == "not enough paired seeds"
+    assert "boot_lo" not in table
+
+
+def test_three_or_more_seeds_keep_the_seed_rule_and_add_the_bootstrap_columns(tmp_path):
+    metrics = fabricated_run(tmp_path, seeds=(42, 43, 44))
+
+    table = compare_arms(metrics, models_dir=tmp_path, n_boot=100)
+    result = reliable_gain(table, dataset="bank_marketing", arm="ctgan", fill_level=0.25)
+
+    row = pick(table, "ctgan", 0.25, "test")
+    assert row.n_paired == 3 and row.boot_seed == 42  # the bootstrap uses the lowest seed
+    assert result.basis == "seed spread" and result.spread["test"] == pytest.approx(row.diff_sd)
+    assert set(result.interval) == {"validation", "test"}
+
+
+def test_arms_scored_on_different_rows_are_rejected(tmp_path):
+    metrics = fabricated_run(tmp_path)
+    path = tmp_path / f"{model_artifact_stem(Arm.GAN, 0.25, 42, 'CatBoost')}_test.csv"
+    scores = pd.read_csv(path)
+    scores["source_row"] += 1
+    scores.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="different rows"):
+        compare_arms(metrics, models_dir=tmp_path, n_boot=50)
 
 
 # --- segments ----------------------------------------------------------------------------------

@@ -223,6 +223,27 @@ because the cleaning changes nothing there. On IEEE-CIS the cleaned arm is itsel
 original (0.409 against 0.453); the synthetic arms recover part of that gap (CTGAN up to 0.435)
 without passing the original.
 
+**One-seed table and chart.** `results/cross_dataset.csv` and `.png` use the seed-42 rows of
+`results/training_all_arms.csv` and give each lift a paired-bootstrap interval (`lo`, `hi`; see
+`docs/evaluation.md`). The five-seed table is kept as `results/cross_dataset_5seed.csv`. The
+interval needs each model's saved scores, which stay in the run folders (git-ignored; IEEE-CIS
+scores must not leave the machine that has the data), so the intervals are saved as aggregates in
+`results/bootstrap_*.csv`. A seed-42 rerun reproduces the saved seed-42 metrics exactly, so the
+run folders can be remade. For a dataset, then for the table:
+
+```bash
+uv run python -m agentic_gan.tools.training_grid --dataset ieee_cis --seeds 42 --no-save \
+    --ctgan-prefix data/interim/ieee_cis/synthetic/ieee_ctgan_v1_fill
+uv run python -m agentic_gan.tools.cross_dataset --metrics results/training_all_arms.csv \
+    --seeds 42 --scores ieee_cis=runs/<run_folder> --bootstrap-out results/bootstrap_ieee_cis.csv
+uv run python -m agentic_gan.tools.cross_dataset --metrics results/training_all_arms.csv \
+    --seeds 42 --bootstrap results/bootstrap_*.csv \
+    --out results/cross_dataset.csv --plot results/cross_dataset.png
+```
+
+A dataset with no saved intervals keeps the verdict "not enough paired seeds", and its chart
+panel says "no interval".
+
 **Caveats**
 
 - **IEEE-CIS has one seed (42), not five**, so it has no seed spread and is not comparable to the

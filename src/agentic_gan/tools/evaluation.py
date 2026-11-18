@@ -9,17 +9,24 @@ when, on both validation and test, the mean paired lift over the original arm (s
 larger than the seed-to-seed spread of that lift (its sample standard deviation over the seeds),
 and at least MIN_SEEDS seeds are paired. A lift below minus the spread on both is a reliable
 loss; anything else, a lift inside the noise or one that differs between splits, is inconclusive.
+
+With fewer than MIN_SEEDS seeds (one seed, 42, is the default) the uncertainty comes from a paired
+bootstrap over the rows of each evaluation split instead: the 95% interval of the metric
+difference, with positives and negatives resampled separately. A gain needs the interval's lower
+bound above 0 on both validation and test, a loss its upper bound below 0 on both, and anything
+else is inconclusive. The bootstrap covers the sampling noise of the evaluation rows only. Model
+training and generator randomness are fixed by the seed, so it says nothing about them.
 """
 
 import json
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 
 from agentic_gan.tools.baselines import pr_auc_score
 
@@ -29,26 +36,270 @@ ARM_ORDER = ("original", "cleaned", "smotenc", "ctgan")
 REFERENCE_ARM = "original"
 MIN_SEEDS = 3
 MAX_CATEGORIES = 10
+N_BOOT = 1000
+BOOTSTRAP_ALPHA = 0.05
+BOOTSTRAP_METRICS = ("pr_auc", "roc_auc")
+_BOOT_COLUMNS = ["boot_seed", "boot_diff", "boot_lo", "boot_hi", "n_boot"]
+_CHUNK_CELLS = 4_000_000  # resample weights held at once: rows in a chunk times evaluation rows
 _COLUMNS = ("dataset", "arm", "fill_level", "seed", "split", "status", "selected", *METRICS)
 _ONE_ROW = ["dataset", "arm", "fill_level", "seed", "split"]
 _GROUP = ["dataset", "arm", "fill_level", "split", "metric"]
 
 
-def compare_arms(metrics: pd.DataFrame, *, reference: str = REFERENCE_ARM) -> pd.DataFrame:
-    """Mean and seed-to-seed spread per dataset, arm, fill level, split and metric.
-
-    Each arm, level and seed counts once, with the model the training agent selected. `diff_mean`
-    and `diff_sd` are the paired difference from the reference arm at the same seeds (NaN for the
-    reference itself); `n_paired` is how many seeds had a reference to pair with.
-    """
+def _selected_rows(metrics: pd.DataFrame) -> pd.DataFrame:
+    """The successful models the training agent selected, on the validation and test splits."""
     missing = [name for name in _COLUMNS if name not in metrics]
     if missing:
         raise ValueError(f"metrics table is missing columns: {missing}")
-    rows = metrics[
+    return metrics[
         metrics["status"].astype(str).str.upper().eq("SUCCESS")
         & metrics["selected"].astype(str).str.lower().eq("true")
         & metrics["split"].isin(SPLITS)
     ]
+
+
+# --- paired bootstrap -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    """The observed difference `other - base` in a metric, with its paired-bootstrap interval."""
+
+    diff: float
+    lo: float
+    hi: float
+    n_boot: int
+
+
+class _Ranked:
+    """One model's scores, sorted once, so many weighted resamples of the rows can be scored."""
+
+    def __init__(self, y: np.ndarray, scores: np.ndarray):
+        self.order = np.argsort(-scores, kind="stable")
+        ranked = scores[self.order]
+        self.ends = np.flatnonzero(np.append(ranked[1:] != ranked[:-1], True))  # last of each tie
+        self.positive = y[self.order] == 1
+        self.n_positive = int(self.positive.sum())
+        self.n_negative = len(y) - self.n_positive
+
+    def area(self, counts: np.ndarray, metric: str) -> np.ndarray:
+        """`metric` of every resample; `counts[i, j]` is how often row j is drawn in resample i.
+
+        This equals scoring the drawn rows one by one with `pr_auc_score` (trapezoidal, as in the
+        metrics tables) or `roc_auc_score`. Both are areas under a curve with a point at each
+        distinct score, and a resample only changes the weight each row carries along the curve.
+        """
+        weights = counts[:, self.order]
+        true_pos = np.cumsum(weights * self.positive, axis=1)[:, self.ends]
+        false_pos = np.cumsum(weights * ~self.positive, axis=1)[:, self.ends]
+        start = np.zeros((len(counts), 1))
+        recall = np.hstack([start, true_pos / self.n_positive])
+        if metric == "roc_auc":
+            across, height = np.hstack([start, false_pos / self.n_negative]), recall
+        else:
+            seen = true_pos + false_pos
+            precision = np.where(seen > 0, true_pos / np.maximum(seen, 1), 1.0)
+            across, height = recall, np.hstack([start + 1.0, precision])
+        return np.sum(np.diff(across, axis=1) * (height[:, 1:] + height[:, :-1]) / 2, axis=1)
+
+
+def paired_bootstrap(
+    y_true,
+    base_scores,
+    other_scores,
+    *,
+    metric: str = "pr_auc",
+    n_boot: int = N_BOOT,
+    seed: int = 0,
+    alpha: float = BOOTSTRAP_ALPHA,
+) -> BootstrapResult:
+    """How far `other_scores` are above `base_scores` on the same rows, with an interval.
+
+    Every resample draws the row indices of the positives, and of the negatives, with replacement
+    (so the class counts never change) and scores both models on the same drawn rows. The interval
+    is the `alpha / 2` and `1 - alpha / 2` percentiles of `metric(other) - metric(base)` over
+    `n_boot` resamples. `diff` is the same difference on the rows as given. `metric` is `pr_auc`
+    (trapezoidal, as in the metrics tables) or `roc_auc`. The inputs must be aligned: the same
+    rows in the same order. The same `seed` gives the same result.
+    """
+    if metric not in BOOTSTRAP_METRICS:
+        raise ValueError(f"metric must be one of {BOOTSTRAP_METRICS}, not {metric!r}")
+    if int(n_boot) != n_boot or n_boot < 1:
+        raise ValueError("n_boot must be a positive whole number")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between 0 and 1")
+    y = np.asarray(y_true)
+    base = np.asarray(base_scores, dtype=float)
+    other = np.asarray(other_scores, dtype=float)
+    if y.ndim != 1 or base.shape != y.shape or other.shape != y.shape:
+        raise ValueError("y_true, base_scores and other_scores must be aligned: one value per row")
+    if not (np.isfinite(base).all() and np.isfinite(other).all()):
+        raise ValueError("scores must be finite")
+    if not np.isin(y, (0, 1)).all() or len(np.unique(y)) != 2:
+        raise ValueError("y_true must hold both classes, 0 and 1")
+    y = y.astype(int)
+    score = pr_auc_score if metric == "pr_auc" else roc_auc_score
+    observed = float(score(y, other) - score(y, base))
+
+    positives, negatives = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
+    base_ranked, other_ranked = _Ranked(y, base), _Ranked(y, other)
+    rng = np.random.default_rng(seed)
+    n_boot = int(n_boot)
+    diffs = np.empty(n_boot)
+    chunk = max(1, _CHUNK_CELLS // len(y))
+    for start in range(0, n_boot, chunk):
+        size = min(chunk, n_boot - start)
+        counts = np.empty((size, len(y)), dtype=np.int32)
+        for row in range(size):
+            drawn = np.concatenate(
+                [
+                    positives[rng.integers(0, len(positives), len(positives))],
+                    negatives[rng.integers(0, len(negatives), len(negatives))],
+                ]
+            )
+            counts[row] = np.bincount(drawn, minlength=len(y))
+        diffs[start : start + size] = other_ranked.area(counts, metric) - base_ranked.area(
+            counts, metric
+        )
+    lo, hi = np.quantile(diffs, [alpha / 2, 1 - alpha / 2])
+    return BootstrapResult(observed, float(lo), float(hi), n_boot)
+
+
+def load_selected_scores(
+    models_dir: str | Path,
+    metrics: pd.DataFrame,
+    *,
+    arm: str,
+    fill_level: float,
+    seed: int,
+    split: str,
+) -> pd.DataFrame:
+    """The saved scores of the model selected for one arm, fill level, seed and split.
+
+    `metrics` is the training agent's metrics table (`selected` marks the validation winner) and
+    `models_dir` its models folder. Returns `source_row`, `y_true` and `probability`, sorted by
+    `source_row`, so two arms' scores line up row for row.
+    """
+    # Imported here so the tools do not load the training agent unless scores are read.
+    from agentic_gan.agents.training import ARM_LABELS, model_artifact_stem
+
+    arms = {label: arm_enum for arm_enum, label in ARM_LABELS.items()}
+    if arm not in arms:
+        raise ValueError(f"unknown arm {arm!r}; expected one of {sorted(arms)}")
+    if "model" not in metrics:
+        raise ValueError("metrics table is missing the model column")
+    rows = _selected_rows(metrics)
+    cell = rows[
+        rows["arm"].eq(arm)
+        & np.isclose(rows["fill_level"], fill_level)
+        & rows["seed"].eq(seed)
+        & rows["split"].eq(split)
+    ]
+    if len(cell) != 1:
+        raise ValueError(
+            f"expected one selected model for {arm} at fill {fill_level:g}, seed {seed}, {split}; "
+            f"found {len(cell)}"
+        )
+    stem = model_artifact_stem(
+        arms[arm], float(cell["fill_level"].iloc[0]), seed, cell["model"].iloc[0]
+    )
+    scores = pd.read_csv(Path(models_dir) / f"{stem}_{split}.csv")
+    return scores[["source_row", "y_true", "probability"]].sort_values(
+        "source_row", ignore_index=True
+    )
+
+
+def bootstrap_table(
+    metrics: pd.DataFrame,
+    models_dir: str | Path | Mapping[str, str | Path],
+    *,
+    reference: str = REFERENCE_ARM,
+    n_boot: int = N_BOOT,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """The paired-bootstrap difference from the reference arm, per dataset, arm, level and split.
+
+    Scores come from the selected models' saved predictions, at the lowest seed that the arm and
+    the reference share. `models_dir` is the training agent's models folder, or a mapping from
+    dataset name to one. Each row carries `boot_diff`, its interval `boot_lo` to `boot_hi` and
+    the model seed it used, for each metric in `BOOTSTRAP_METRICS`.
+    """
+    rows = _selected_rows(metrics)
+    table = []
+    for dataset, group in rows.groupby("dataset", sort=False):
+        if isinstance(models_dir, Mapping) and dataset not in models_dir:
+            continue  # no saved scores for this dataset, so it gets no bootstrap rows
+        folder = models_dir[dataset] if isinstance(models_dir, Mapping) else models_dir
+        base = group[group["arm"].eq(reference)]
+        if base.empty:
+            continue
+        base_level = float(base["fill_level"].iloc[0])
+        others = group[group["arm"].ne(reference)]
+        for (arm, level), cells in others.groupby(["arm", "fill_level"], sort=False):
+            for split in SPLITS:
+                shared = set(cells.loc[cells["split"].eq(split), "seed"]) & set(
+                    base.loc[base["split"].eq(split), "seed"]
+                )
+                if not shared:
+                    continue
+                used = min(shared)
+                kept = load_selected_scores(
+                    folder, group, arm=reference, fill_level=base_level, seed=used, split=split
+                )
+                other = load_selected_scores(
+                    folder, group, arm=arm, fill_level=level, seed=used, split=split
+                )
+                if not (
+                    kept["source_row"].equals(other["source_row"])
+                    and kept["y_true"].equals(other["y_true"])
+                ):
+                    raise ValueError(
+                        f"{arm} at fill {level:g} and {reference} are scored on different rows "
+                        f"({dataset}, seed {used}, {split})"
+                    )
+                for metric in BOOTSTRAP_METRICS:
+                    result = paired_bootstrap(
+                        kept["y_true"],
+                        kept["probability"],
+                        other["probability"],
+                        metric=metric,
+                        n_boot=n_boot,
+                        seed=seed,
+                    )
+                    table.append(
+                        {
+                            "dataset": dataset,
+                            "arm": arm,
+                            "fill_level": level,
+                            "split": split,
+                            "metric": metric,
+                            "boot_seed": int(used),
+                            "boot_diff": result.diff,
+                            "boot_lo": result.lo,
+                            "boot_hi": result.hi,
+                            "n_boot": result.n_boot,
+                        }
+                    )
+    return pd.DataFrame(table, columns=[*_GROUP, *_BOOT_COLUMNS])
+
+
+def compare_arms(
+    metrics: pd.DataFrame,
+    *,
+    reference: str = REFERENCE_ARM,
+    models_dir: str | Path | Mapping[str, str | Path] | None = None,
+    n_boot: int = N_BOOT,
+) -> pd.DataFrame:
+    """Mean and seed-to-seed spread per dataset, arm, fill level, split and metric.
+
+    Each arm, level and seed counts once, with the model the training agent selected. `diff_mean`
+    and `diff_sd` are the paired difference from the reference arm at the same seeds (NaN for the
+    reference itself); `n_paired` is how many seeds had a reference to pair with. With
+    `models_dir` (the training agent's models folder, see `bootstrap_table`) the table also has the
+    `boot_*` columns: the paired-bootstrap difference from the reference and its interval, which
+    `reliable_gain` uses when fewer than MIN_SEEDS seeds are paired.
+    """
+    rows = _selected_rows(metrics)
     if rows.duplicated(_ONE_ROW).any():
         raise ValueError("more than one selected model per dataset, arm, fill level, seed, split")
     long = rows.melt(
@@ -69,6 +320,9 @@ def compare_arms(metrics: pd.DataFrame, *, reference: str = REFERENCE_ARM) -> pd
         diff_sd=("diff", "std"),
     )
     table = table.reset_index()
+    if models_dir is not None:
+        boot = bootstrap_table(metrics, models_dir, reference=reference, n_boot=n_boot)
+        table = table.merge(boot, on=_GROUP, how="left")
     rank = table["arm"].map({arm: i for i, arm in enumerate(ARM_ORDER)}).fillna(len(ARM_ORDER))
     metric_rank = table["metric"].map({metric: i for i, metric in enumerate(METRICS)})
     order = table.assign(rank=rank, metric_rank=metric_rank).sort_values(
@@ -87,12 +341,59 @@ class GainVerdict:
     metric: str
     verdict: str  # reliable gain, reliable loss, inconclusive or not enough paired seeds
     lift: dict[str, float]  # mean paired lift over the reference arm, by split
-    spread: dict[str, float]  # seed-to-seed spread of that lift, by split
+    spread: dict[str, float]  # seed-to-seed spread of that lift, or half its bootstrap interval
     reason: str
+    basis: str = "seed spread"  # "paired bootstrap" when fewer than MIN_SEEDS seeds are paired
+    interval: dict[str, tuple[float, float]] = field(default_factory=dict)  # bootstrap, by split
 
     @property
     def reliable(self) -> bool:
         return self.verdict == "reliable gain"
+
+
+def _bootstrap_intervals(rows: pd.DataFrame) -> dict[str, tuple[float, float, float]]:
+    """The bootstrap difference and its interval for each split, or {} unless both have one."""
+    if not {"boot_diff", "boot_lo", "boot_hi"} <= set(rows.columns):
+        return {}
+    found = {}
+    for split in SPLITS:
+        if split not in rows.index:
+            return {}
+        values = rows.loc[split, ["boot_diff", "boot_lo", "boot_hi"]]
+        if values.isna().any():
+            return {}
+        found[split] = tuple(float(value) for value in values)
+    return found
+
+
+def _bootstrap_verdict(
+    dataset: str, arm: str, fill_level: float, metric: str, boot: dict
+) -> GainVerdict:
+    lift = {split: boot[split][0] for split in SPLITS}
+    interval = {split: (boot[split][1], boot[split][2]) for split in SPLITS}
+    spread = {split: (hi - lo) / 2 for split, (lo, hi) in interval.items()}
+    reason = "; ".join(
+        f"{s} lift {lift[s]:.4f}, interval [{interval[s][0]:.4f}, {interval[s][1]:.4f}]"
+        for s in SPLITS
+    )
+    if all(interval[split][0] > 0 for split in SPLITS):
+        verdict = "reliable gain"
+    elif all(interval[split][1] < 0 for split in SPLITS):
+        verdict = "reliable loss"
+    else:
+        verdict = "inconclusive"
+    return GainVerdict(
+        dataset,
+        arm,
+        fill_level,
+        metric,
+        verdict,
+        lift,
+        spread,
+        reason,
+        "paired bootstrap",
+        interval,
+    )
 
 
 def reliable_gain(
@@ -103,16 +404,23 @@ def reliable_gain(
     fill_level: float = 0.0,
     metric: str = "pr_auc",
 ) -> GainVerdict:
-    """Apply the reliable-gain rule (module docstring) to one row group of `compare_arms`."""
+    """Apply the reliable-gain rule (module docstring) to one row group of `compare_arms`.
+
+    With at least MIN_SEEDS paired seeds the seed-spread rule decides. With fewer, the verdict
+    comes from the bootstrap interval, if `compare_arms` was given the scores to compute it.
+    """
     rows = comparison[
         comparison["dataset"].eq(dataset)
         & comparison["arm"].eq(arm)
         & np.isclose(comparison["fill_level"], fill_level)
         & comparison["metric"].eq(metric)
     ].set_index("split")
+    boot = _bootstrap_intervals(rows)
     lift, spread = {}, {}
     for split in SPLITS:
         if split not in rows.index or rows.loc[split, "n_paired"] < MIN_SEEDS:
+            if boot:
+                return _bootstrap_verdict(dataset, arm, fill_level, metric, boot)
             reason = f"fewer than {MIN_SEEDS} seeds paired with the original arm on {split}"
             return GainVerdict(
                 dataset, arm, fill_level, metric, "not enough paired seeds", lift, spread, reason
@@ -126,7 +434,10 @@ def reliable_gain(
         verdict = "reliable loss"
     else:
         verdict = "inconclusive"
-    return GainVerdict(dataset, arm, fill_level, metric, verdict, lift, spread, reason)
+    interval = {split: (boot[split][1], boot[split][2]) for split in boot}
+    return GainVerdict(
+        dataset, arm, fill_level, metric, verdict, lift, spread, reason, interval=interval
+    )
 
 
 def segment_metrics(
