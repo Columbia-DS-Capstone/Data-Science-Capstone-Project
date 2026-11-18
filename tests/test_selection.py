@@ -600,6 +600,8 @@ def test_knobs_other_than_bank_default_to_v1(tmp_path):
     assert _generator_knobs("polish", 1, {}) == {
         "epochs": 300, "batch_size": 500, "pac": 10, "discriminator_steps": 1,
         "sampling_mode": "conditional", "rule_filter": False, "rake_columns": [],
+        "selection_mode": "none", "pool_multiplier": 5,
+        "boundary_low": 0.10, "boundary_high": 0.60,
     }
     moved = _generator_knobs("polish", 2, {"pac": 20, "sampling_mode": "unconditional"})
     assert moved["pac"] == 20 and moved["sampling_mode"] == "unconditional"
@@ -1831,8 +1833,9 @@ def test_backup_eligible_false_when_fallback_is_not_wgan_gp():
 
 
 def test_rule_hash_stable_after_step7(tmp_path):
-    # Covers WGAN defaults, the dataset recipe, and targeted retry options.
-    post_step7_hash = "ec2bc6f99c3000cddf945c87b226b85d1bf1dbd091040651e2695c8619d7bba1"
+    # Covers WGAN defaults, the dataset recipe, and targeted retry options. Moved when the recipe
+    # gained selection_mode, pool_multiplier, boundary_low and boundary_high (#100).
+    post_step7_hash = "2db59320981cd1d4bcfcfba4724ef04472c6fa5bc9d3b2463ccc4bf13e2faccb"
     config = _config(tmp_path)
     assert _rule_hash(config) == post_step7_hash
 
