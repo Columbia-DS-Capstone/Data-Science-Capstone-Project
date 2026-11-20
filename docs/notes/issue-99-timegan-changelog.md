@@ -120,3 +120,73 @@ Facts confirmed, with the lines they come from:
   row. This does not affect training; the sampler's `drop_duplicates_of` handles copies.
 - **Schedule.** The issue's checkpoints (Nov 16, 18, 19) and the Thu Nov 19 21:00 merge
   freeze have passed. Whether the PR may merge during the freeze is Kyle's call.
+
+## Entry 1 — 2026-11-20 — Step 1 data layer
+
+### Built
+
+`src/agentic_gan/tools/timegan.py` (new), with no networks yet:
+
+- `DEFAULTS` (`num_layers` 3, `gamma` 1.0, `lr` 1e-3, `noise_dim` None, meaning the width of
+  the feature vector), `HIDDEN_DIM_RANGE = (24, 64)`, `DEVICES`.
+- `step_columns_from_wide(wide, n_steps, *, newest_first)`: feature-major names to one list
+  per step, oldest first.
+- `SequenceLayout` (frozen dataclass) and `fit_layout`. The per-feature fields follow the
+  feature vector: step features (`step_feature_0..`), static columns, target.
+- `to_sequences` and `from_sequences`.
+- `_validate_frame` (called by `fit_layout`) and `_validate_args`.
+- `TrainedTimeGAN` dataclass, `save_model`, `load_model`.
+
+`tests/tools/test_timegan.py` (new): 69 tests.
+
+### Worked
+
+```
+uv run pytest tests/tools/test_timegan.py -q
+69 passed in 3.37s
+
+uv run ruff check src/agentic_gan/tools/timegan.py tests/tools/test_timegan.py
+All checks passed!
+
+uv run ruff check src tests
+Found 51 errors.   (unchanged baseline, all in src/agentic_gan/web.py)
+
+uv run pytest tests/tools/test_timegan.py tests/tools/test_wgan_gp.py -q
+135 passed, 1 warning in 23.57s
+```
+
+- The toy table and the real 18,000-row train split both round-trip exactly through
+  `to_sequences` then `from_sequences` (values, column order and dtypes).
+- On the real train split the layout is: tensor (18000, 6, 9), float32, range 0 to 1. Coded
+  features are repayment status, `SEX`, `EDUCATION`, `MARRIAGE` and `y`. The learned status
+  codes equal `DEFAULT_PAY_CODES`.
+- Uniform random sequences, and sequences far outside 0 to 1, decode to rows that break no
+  `DEFAULT_RULES`.
+
+### Failed
+
+- One test of mine had a wrong expectation: it assumed the toy table's smallest payment
+  amount was 0, but the generated minimum was 9. The decoder was right. The toy table now
+  sets about a fifth of the payment amounts to 0, as the real table does, and the fixture
+  asserts the minimum is 0. No code change.
+
+### Decisions
+
+- Checks added beyond the step's list, each a `ValueError`: the target listed as a feature;
+  duplicate column names; infinite values; fewer than 2 rows. `from_sequences` also refuses a
+  wrong shape and non-finite values, so a diverged generator fails loudly instead of decoding
+  to a valid-looking row.
+- Snapping uses a sorted search, not a distance matrix, because the target is always coded
+  and may have many values. A tie goes to the lower code.
+- `noise_dim` is `None` in `DEFAULTS` and resolved to the feature width at training time.
+- The settings checks are tested through `_validate_args` for now. Step 2 will exercise them
+  through `train_timegan`.
+
+### Open questions
+
+- **Float32 precision.** An integer-valued feature decodes exactly only while its range is
+  below 2**24 (about 16.7 million). Default's widest range is 1,215,471, so it is safe. The
+  module docstring states the limit.
+- **Amount scaling, now measured.** On the real train split the median scaled payment amount
+  is 0.0016 and the median scaled bill amount is 0.19. This confirms the Step 0 concern that
+  min-max scaling leaves the payment amounts crowded near 0.
