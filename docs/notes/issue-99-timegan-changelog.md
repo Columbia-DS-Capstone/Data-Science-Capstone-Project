@@ -655,3 +655,64 @@ Nothing failed. What the numbers say:
 - The fidelity gate failed badly (Entry 6) and PR-AUC barely moved. Rows that are far from
   the real positives did not hurt the boosted models much at a 10% fill. Whether that holds
   at 25% or 50% was not measured.
+
+## Entry 8 — 2026-11-20 — Step 8 write-up
+
+### Built
+
+- `docs/notes/timegan_default.md`, following the structure of `docs/notes/ctgan_bank_v2.md`
+  and `docs/notes/ctgan_default_polish_rules.md`: result first, then what was built and the
+  sequence layout, settings and wall time, loss curves, share of defaulters generated,
+  fidelity scorecard with gaps, PR-AUC table, limits, what #137 needs, open items.
+- A draft of the issue comment, kept outside the repository until it is approved.
+- A draft of the slide (below).
+
+### Worked
+
+- Every number in the note comes from a file in `eda/timegan_default/artifacts/`, and each
+  section names its file: `run_meta.json`, `timegan_losses.csv`, `loss_curves.png`,
+  `scorecard.txt`, `quality_fidelity.json`, `pr_auc_comparison.csv`.
+- Read for the #137 section, not edited: the temporal branch of `select_generator` in
+  `tools/selection.py`, and `_train_wgan_gp` and its dispatch in `agents/model_selection.py`.
+
+### Failed
+
+- **Numbers left out of the note on purpose.** The per-month counts of repayment code 1
+  (Entry 6) and the category shares in the fill file (Entry 5) were computed from the fill
+  file and the train split, not saved to an artifact. The note states the finding in words
+  and points here for the counts.
+- **The issue comment is not posted.** It waits for approval, and `gh` is not logged in.
+- **The draft PR is not open yet.** The public GitHub API lists no pull request for this
+  branch. Commits from Step 5 on are not pushed, so the loss-curve image link in the comment
+  draft will only resolve after a push.
+
+### Decisions
+
+- The comment's image link uses the commit of the run (`a641a6a`), so it keeps working if the
+  branch is deleted.
+- The note says plainly that TimeGAN is worse than CTGAN v2 on fidelity and level with it on
+  PR-AUC, and that neither beats cleaned.
+
+### Slide draft
+
+Title: **TimeGAN on Default: valid rows, worse fidelity than CTGAN v2, no PR-AUC gain**
+
+- **Fidelity is worse than CTGAN v2.** TimeGAN fails 4 of 9 hard checks, by 5.5x to 8.7x the
+  limit; CTGAN v2 fails 2, by 1.3x and 3.0x. TimeGAN is further from the real defaulters on
+  all 23 columns.
+- **PR-AUC is level with CTGAN v2, and neither beats cleaned.** Best validation PR-AUC:
+  cleaned 0.5318, TimeGAN 0.5254, CTGAN v2 0.5248 (10% fill, seed 42).
+- **It runs end to end in 25.7 minutes on CPU**, but the generator stops improving after
+  epoch 4 of the joint phase and makes 12.4% defaulters against 22.1% real.
+
+Table: the PR-AUC table of Entry 7 (three arms by four models, validation and test, winners
+marked). Footnote: one seed, one fill level; the stacking ensemble is about 0.14 in every arm
+and on `main`.
+
+Figure: `eda/timegan_default/artifacts/loss_curves.png`. The joint-phase panel shows the flat
+generator loss.
+
+### Open questions
+
+- Approval of the issue comment, and who posts it (`gh auth login`, or paste by hand).
+- Whether to push the branch now, so the image link resolves and the draft PR shows the run.
