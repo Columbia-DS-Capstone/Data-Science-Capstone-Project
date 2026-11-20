@@ -74,3 +74,19 @@ def test_save_results_replaces_one_dataset_and_keeps_the_others(tmp_path):
 def test_ieee_cis_needs_its_local_files(tmp_path):
     with pytest.raises(FileNotFoundError):
         build_request("ieee_cis", [42], runs_dir=tmp_path)
+
+
+def test_fine_grid_uses_nested_prefixes_of_one_pool(tmp_path):
+    levels = (0.01, 0.025, 0.05, 0.10, 0.25)
+    request, run = build_request(
+        "bank_marketing",
+        [42],
+        levels,
+        "data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill",
+        tmp_path,
+    )
+    pool = pd.read_csv(ROOT / "data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill25.csv")
+    for item in request.accepted_synthetic:
+        actual = pd.read_csv(run.root / item.path)
+        pd.testing.assert_frame_equal(actual, pool.head(item.rows))
+    assert "2.5" in request.accepted_synthetic[1].path.name

@@ -313,3 +313,31 @@ unless you opt in; set up Vertex access as in [llm_agents.md](llm_agents.md), th
 ```bash
 RUN_LIVE_LLM=1 uv run pytest -m live
 ```
+
+### Validation volume rule (#36)
+
+Run the finer Bank grid at seed 42, reusing one CTGAN V2 pool (all levels are nested
+prefixes; a `fill25.csv` or larger file covers the grid, including `2.5%`):
+
+```sh
+uv run python -m agentic_gan.tools.training_grid --dataset bank_marketing --seeds 42 \
+  --fill-levels 0.01 0.025 0.05 0.10 0.25 \
+  --ctgan-prefix data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill \
+  --results-dir results/volume
+uv run python -m agentic_gan.tools.volume --dataset bank_marketing --run runs/<id> \
+  --out results/volume/bank_decisions.json
+```
+
+`--ctgan-pool <file>` is an alternative to `--ctgan-prefix`. A short pool is rejected.
+For Default, use `--dataset default` and the `default_ctgan_v2_fill` prefix after
+#136's recipe is available. These are offline training comparisons; they do not
+claim that synthetic rows passed the pipeline quality gate.
+
+`pick_fill` uses only aligned validation predictions of each cell's selected model,
+compared with cleaned at fill 0. Candidates need a strictly positive lower bound
+on the paired-bootstrap 95% PR-AUC lift interval. The largest eligible lift wins;
+exact ties prefer the smaller fill. With no eligible candidate, the decision is
+0% (cleaned). Test results are for reporting only and cannot change this choice.
+The cross-dataset chart derives its fill ticks from the data, including 1%, 2.5%
+and 5%, and retains the dotted cleaned reference line. Orchestrator integration
+is owned by #134.

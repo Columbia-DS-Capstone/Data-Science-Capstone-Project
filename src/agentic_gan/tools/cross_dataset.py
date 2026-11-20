@@ -22,6 +22,7 @@ from saved intervals alone, so IEEE-CIS can be bootstrapped where its files are:
 """
 
 import argparse
+import textwrap
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
@@ -187,7 +188,10 @@ def plot_cross_dataset(
                     mec="white",
                     mew=0.8,
                 )
-            ax.set_xticks([0, 10, 25, 50], ["0%", "10%", "25%", "50%"])
+            levels = sorted({0.0, *rows["fill_level"].mul(100).tolist()})
+            ax.set_xticks(levels, [f"{level:g}%" for level in levels])
+            if len(levels) > 4:
+                ax.tick_params(axis="x", labelrotation=60, labelsize=8)
             ax.grid(axis="y", color="#d0d0d0", lw=0.5)
             ax.set_axisbelow(True)
             for side in ("top", "right"):
@@ -216,7 +220,12 @@ def plot_cross_dataset(
         )
         for a in present
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles), frameon=False)
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=min(len(handles), max(2, 2 * len(datasets))),
+        frameon=False,
+    )
     bars = (
         f"PR-AUC bars = 95% paired-bootstrap interval of the lift over {reference}, drawn around "
         f"the {reference} line (F1 has none). A verdict needs the interval clear of 0 on "
@@ -229,8 +238,9 @@ def plot_cross_dataset(
         f"Dotted line = the {reference} arm that the synthetic rows are added to. "
         "Each panel has its own scale."
     )
+    note = textwrap.fill(note, width=max(55, int(fig.get_figwidth() * 18)))
     fig.text(0.5, 0.006, note, ha="center", fontsize=8, color="#555555")
-    fig.tight_layout(rect=(0, 0.05, 1, 0.93))
+    fig.tight_layout(rect=(0, 0.12, 1, 0.93))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
