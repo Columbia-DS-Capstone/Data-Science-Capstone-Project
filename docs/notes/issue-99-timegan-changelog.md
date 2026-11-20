@@ -579,3 +579,79 @@ validation split. Nothing read the test split.
   so it needs a decision before anyone makes it. Not done here.
 - The other failures (SEX 98.6% one value, narrow bill and payment amounts, correlation
   differences of 0.35) come from the generator and would need a training change.
+
+## Entry 7 — 2026-11-20 — Step 7 training grid
+
+### Built
+
+No code changed. One artifact: `eda/timegan_default/artifacts/pr_auc_comparison.csv`, built
+by a one-off command from the two runs' `metrics.csv` files. The `runs/` folder is ignored
+by git, so the run folders themselves are not committed:
+
+- `runs/issue99_timegan/default_20261120-065618/models/metrics.csv`
+- `runs/issue99_ctgan/default_20261120-065642/models/metrics.csv`
+
+### Worked
+
+- Both commands were run as given, each as its own process, with `--seeds 42 --fill-levels
+  0.10 --no-save`. Each ended `status: SUCCESS  fits: 16  run time: 13s` with exit code 0. All
+  32 rows of each `metrics.csv` have status SUCCESS and are eligible for selection.
+- `git status results/` showed no change after each run. A checksum of the CSV files in
+  `results/` was the same before and after.
+- Each run printed `synthetic rows in validation/test predictions: {'validation': 0,
+  'test': 0}`.
+- **How `selected` is defined** (`agents/training.py` lines 777 to 787, called at line 1083
+  once per arm, fill level and seed): the model with the highest validation PR-AUC among the
+  successful models whose validation probabilities are not constant. It is each arm's
+  validation winner.
+- **The cleaned arm is identical in the two runs**: all six metrics, the threshold and
+  `selected`, with a largest difference of 0.0. The original and SMOTE-NC arms are identical
+  too. The cleaned validation numbers also equal the seed-42 rows in
+  `results/training_all_arms.csv` on `main`.
+- **Relabelled.** `training_grid` always labels the GAN arm `ctgan`. In the table the arm
+  from the TimeGAN run is `timegan_10pct` and the arm from the CTGAN run is `ctgan_v2_10pct`.
+  The cleaned rows are taken from the TimeGAN run.
+- PR-AUC, seed 42, 10% fill (1,004 synthetic rows, 19,004 training rows). `*` marks the
+  arm's validation winner:
+
+  | Model | Cleaned val | Cleaned test | CTGAN v2 10% val | CTGAN v2 10% test | TimeGAN 10% val | TimeGAN 10% test |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Gradient boosting | 0.5204 | 0.5425 | 0.5176 | 0.5345 | 0.5086 | 0.5186 |
+  | LightGBM | 0.5244 | 0.5723 | 0.5248 * | 0.5575 * | 0.5229 | 0.5610 |
+  | CatBoost | 0.5318 * | 0.5576 * | 0.5245 | 0.5553 | 0.5254 * | 0.5574 * |
+  | Stacking ensemble | 0.1406 | 0.1391 | 0.1407 | 0.1384 | 0.1436 | 0.1416 |
+
+- Validation winners: cleaned CatBoost 0.5318 (test 0.5576); CTGAN v2 LightGBM 0.5248 (test
+  0.5575); TimeGAN CatBoost 0.5254 (test 0.5574).
+
+### Failed
+
+Nothing failed. What the numbers say:
+
+- **Neither fill beats cleaned.** The TimeGAN arm's winner is 0.0064 below the cleaned winner
+  on validation and 0.0002 below on test. The CTGAN v2 arm's winner is 0.0070 below on
+  validation and 0.0001 below on test.
+- **TimeGAN and CTGAN v2 are level**: 0.0006 apart on validation and 0.0001 on test for the
+  winners. With one seed there is no noise estimate, so this is not a ranking.
+- Gradient boosting loses the most with TimeGAN rows: 0.0118 on validation and 0.0239 on
+  test below cleaned.
+
+### Decisions
+
+- The table is in long form: one row per arm and model, with validation and test PR-AUC, the
+  winner flag, the difference from cleaned for the same model, and the source run.
+- The test PR-AUC is reported because the issue asks for it. It is not used to choose
+  anything. The test split was read by `training_grid`, the project's scoring tool, and by
+  nothing written for this issue.
+
+### Open questions
+
+- **The stacking ensemble scores 0.14 PR-AUC in every arm**, below the 0.22 share of
+  positives. The same value is in `results/training_all_arms.csv` on `main`, so it is not
+  caused by this work. It looks like a fault in that model or its scoring, and someone
+  should look at it outside this issue.
+- **One seed.** A difference of 0.006 in validation PR-AUC may be within seed noise. The
+  five-seed results on `main` would give the spread for cleaned.
+- The fidelity gate failed badly (Entry 6) and PR-AUC barely moved. Rows that are far from
+  the real positives did not hurt the boosted models much at a 10% fill. Whether that holds
+  at 25% or 50% was not measured.
