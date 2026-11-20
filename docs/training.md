@@ -370,7 +370,8 @@ unchanged. Result files retain separate weights on upsert. Filter to one weight 
 dataset before using the evaluation/comparison tools, or use a separate results
 directory per weight, so different objectives are never averaged together.
 
-The Bank weight experiment waits for #36 to merge, as required by #135. After that:
+The Bank weight experiment was completed after PR #146 merged #36, as required by #135.
+Results are in `results/weights/README.md`; reproduce it with:
 
 ```sh
 for weight in 0.25 0.5 1.0; do
@@ -382,7 +383,7 @@ done
 ```
 
 Report validation and test PR-AUC for every selected-model cell, and use #138's
-paired-bootstrap verdict against cleaned on both splits. No weighted Bank result
-is claimed before that experiment is run. #36's Bank cleaned reference is
+paired-bootstrap verdict against cleaned on both splits. The completed Bank sweep found no reliable gain over cleaned (16 inconclusive cells,
+2 reliable losses); its tables include validation and test scores for every cell. #36's Bank cleaned reference is
 validation 0.4500 / test 0.4811; its current grid and decisions are in
 `results/volume/`.

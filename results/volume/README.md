@@ -35,7 +35,8 @@ The run folders hold selected-model probabilities and are intentionally untracke
 Dependencies checked on GitHub: #138 is closed and its helpers are merged;
 #136's Default recipe is merged by PR #143, although #136 remains open because
 its fidelity gate and test target were not met. #134's orchestrator wiring is
-separate work. #135's weighted experiment explicitly waits for #36 to merge.
+separate work. #135's weighted Bank experiment was completed after PR #146 merged #36; see
+`results/weights/README.md`.
 No issue comments or shared-deck changes were published by this implementation.
 
 Environment: LightGBM used the existing scikit-learn `libomp.dylib` via
