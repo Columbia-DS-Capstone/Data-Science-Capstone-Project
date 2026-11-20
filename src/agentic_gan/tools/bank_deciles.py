@@ -97,7 +97,8 @@ def _holdout_scores(path, rows, target, threshold):
     return saved.probability, saved.prediction
 
 
-def _write_chart(table, split, upper, path):
+def _chart(table, split, upper):
+    """The response-rate chart of one split, with the split's overall rate as a reference line."""
     fig = Figure(figsize=(7.4, 4.3), layout="constrained")
     ax = fig.subplots()
     ax.plot(table.decile, table.actual_rate, "o-", color="#12686A", label="Actual response")
@@ -107,6 +108,10 @@ def _write_chart(table, split, upper, path):
         "s--",
         color="#A34B18",
         label="Predicted response",
+    )
+    overall = table.positives.sum() / table.n.sum()
+    ax.axhline(
+        overall, color="#555555", ls=":", lw=1.4, label=f"Overall response rate ({overall:.1%})"
     )
     ax.set(
         title=f"Bank Marketing · {SPLIT_LABELS[split]}",
@@ -118,7 +123,11 @@ def _write_chart(table, split, upper, path):
     ax.yaxis.set_major_formatter(PercentFormatter(1))
     ax.grid(axis="y", alpha=0.25)
     ax.legend(frameon=False)
-    fig.savefig(path, dpi=160)
+    return fig
+
+
+def _write_chart(table, split, upper, path):
+    _chart(table, split, upper).savefig(path, dpi=160)
 
 
 def _write_notes(tables, run, model, path):

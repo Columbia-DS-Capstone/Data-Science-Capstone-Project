@@ -114,7 +114,8 @@ uv run python -m agentic_gan.tools.bank_deciles runs/<run_id> --seed 42
 The exporter reads the validation and test prediction CSVs and scores the
 cleaned training rows with the saved estimator and its frozen threshold. It
 writes three CSVs and three response-rate charts under `results/`, along with
-business takeaways and any held-out response-rate increases between deciles.
+business takeaways and any held-out response-rate increases between deciles. Each
+chart draws that split's overall response rate (11.7% on Bank) as a dotted reference line.
 Train results are in-sample. Equal scores are ordered by source-row ID.
 For runs with a fitted treatment plan, the estimator uses the saved raw split
 to clean the retained training rows with the same fitted encoder.
