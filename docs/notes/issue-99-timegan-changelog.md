@@ -769,3 +769,62 @@ against `main` stays the list in check 3.
   suite in one process without it?
 - `gh` is not logged in, so the PR and the review request have to be made by hand or after
   `gh auth login`.
+
+## Entry 10 — 2026-11-20 — Triage of the Step 9 pytest crash
+
+### Built
+
+Nothing. No source or test file changed. Akriti chose to log the triage only.
+
+### Worked
+
+- **The failure triaged:** Step 9, check 2. `uv run pytest -q --tb=short` ends with exit 139:
+  `tests/test_training_agent.py::test_real_four_model_suite_smoke Fatal Python error:
+  Segmentation fault`, in `lightgbm/basic.py` line 2301 (`__init_from_np2d`), reached from
+  `agents/training.py` line 728 (`_fit_record`). 674 tests had passed. No TimeGAN test had
+  started.
+- **Class: (a) environment.** Not a bug in `timegan.py`. Evidence, each run its own process:
+
+  | Run | Result |
+  | --- | --- |
+  | Full suite on this branch | segfault at that test after 674 passes |
+  | Full suite without `tests/tools/test_timegan.py` (exactly `main`'s suite) | the same segfault after the same 674 passes |
+  | `tests/test_llm_failures.py`, then the crashing test | segfault |
+  | The crashing test alone | 1 passed |
+  | The crashing test, then `tests/test_llm_failures.py` | 32 passed |
+  | `tests/test_llm_failures.py`, then the crashing test, with `OMP_NUM_THREADS=1` | segfault |
+  | All 40 test files, one process each | 1,067 passed, 3 skipped, 1 xfailed |
+
+- **Cause.** Two copies of the OpenMP library in one process: `torch/lib/libomp.dylib` and
+  the one LightGBM loads. Once a test has loaded torch, the next LightGBM fit crashes. The
+  test files that load torch before the crash are all on `main`: `test_llm_failures.py`,
+  `test_orchestrator.py`, `test_retry.py` and `test_selection.py`.
+- **Already known.** `docs/notes/issue-82-model-selection-agent-changelog.md` lines 189 and
+  924 record the same segfault as pre-existing, and `tests/tools/test_wgan_gp.py` line 5 says
+  to run that file alone.
+
+### Failed
+
+- **A second symptom of the same conflict.** `tests/tools/test_timegan.py` followed by the
+  LightGBM test in one process does not crash: it hangs. The process sat at 0% CPU for
+  8 minutes inside `LGBM_DatasetCreateFromMat`, waiting on an OpenMP barrier, and was
+  stopped by hand.
+- The other candidates were checked and are not failures: the run did not diverge (no
+  non-finite loss in 300 rows); the unfiltered `y == 1` share is 0.1240 and the keep rate
+  0.1218, and 1,004 of 1,004 fill rows came back; the failed fidelity gate is an expected
+  result that the issue allows.
+
+### Decisions
+
+- **No fix in this issue.** No number that was reported changes: the training run, the
+  scorecard and the two grid runs each had their own process.
+- The check for this branch is the per-file run. The PR description says so and names the
+  crash.
+
+### Open questions
+
+- **Making the whole suite safe in one process** (for example, running the torch tests in a
+  subprocess) changes test setup shared by every test on `main`. It needs its own issue and
+  an owner.
+- `tests/tools/test_timegan.py` has no "run this file alone" note like the one in
+  `test_wgan_gp.py`. Left out by choice; easy to add later.
