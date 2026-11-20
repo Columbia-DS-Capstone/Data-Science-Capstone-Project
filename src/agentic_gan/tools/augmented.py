@@ -14,9 +14,15 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-from agentic_gan.tools.baselines import build_models, load_protocol, run_models
+from agentic_gan.tools.baselines import (
+    build_models,
+    load_protocol,
+    protocol_with_synthetic_weight,
+    run_models,
+)
 from agentic_gan.tools.preprocessing import Preprocessor
 from agentic_gan.tools.smotenc import smotenc_rows
 from agentic_gan.utils.datasets import DATASETS, DatasetConfig
@@ -34,6 +40,9 @@ RESULT_COLUMNS = [
     "arm",
     "fill_level",
     "n_synthetic",
+    "synthetic_weight",
+    "weight_applied",
+    "warnings",
     "seed",
     "cv_folds",
     "model",
@@ -52,7 +61,7 @@ RESULT_COLUMNS = [
     "test_accuracy",
     "fit_seconds",
 ]
-KEYS = ["dataset", "arm", "fill_level", "seed"]
+KEYS = ["dataset", "arm", "fill_level", "seed", "synthetic_weight"]
 DEFAULT_OUT = ROOT / "results" / "augmented_bank_marketing_frozen.csv"
 BASELINES_FILE = ROOT / "results" / "baselines.csv"
 # Colorblind-safe (Okabe-Ito): one hue per arm, fixed order.
@@ -121,6 +130,7 @@ def run_experiment(
     model_names: Sequence[str] = DEFAULT_MODELS,
     include_real_only: bool = True,
     protocol_dir: Path = ROOT / "results",
+    synthetic_weight: float = 1.0,
 ) -> pd.DataFrame:
     """Return one row per fill level, seed and model.
 
@@ -131,6 +141,7 @@ def run_experiment(
         raise ValueError("generator must be 'smotenc' or 'ctgan'")
     if generator == "ctgan" and pool is None:
         raise ValueError("ctgan needs a pool of synthetic rows")
+    protocol_with_synthetic_weight({}, synthetic_weight)  # validate before fitting
     check_holdouts(tables, config)
     target = config.target
     real = {s: t.drop(columns=ID_COLUMN) for s, t in tables.items()}
@@ -191,8 +202,12 @@ def run_experiment(
                 cv_folds=protocol_cv_folds[seed],
                 model_names=model_names,
                 thresholds=protocols[seed]["thresholds"],
+                sample_weight=np.concatenate([np.ones(len(X_train)), np.full(n, synthetic_weight)]),
+                synthetic_weight=synthetic_weight,
             )
-            table["protocol_id"] = protocols[seed]["protocol_id"]
+            table["protocol_id"] = protocol_with_synthetic_weight(
+                protocols[seed], synthetic_weight
+            )["protocol_id"]
             table["dataset"], table["arm"] = config.name, arm
             table["fill_level"], table["n_synthetic"] = fill, n
             frames.append(table)
@@ -203,12 +218,21 @@ def save_results(table: pd.DataFrame, path: Path) -> None:
     """Upsert by dataset, arm, fill level and seed, keeping other arms' rows."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    table = table.copy()
+    if "synthetic_weight" not in table:
+        table["synthetic_weight"] = 1.0
     if path.exists():
         old = pd.read_csv(path)
+        if "synthetic_weight" not in old:
+            old["synthetic_weight"] = 1.0
         if "protocol_id" not in old or old.protocol_id.isna().any():
             raise ValueError("Legacy 0.5-threshold results require a separate output file")
-        for (dataset, seed), incoming_rows in table.groupby(["dataset", "seed"]):
-            existing = old[(old.dataset == dataset) & (old.seed == seed)]
+        for (dataset, seed, weight), incoming_rows in table.groupby(
+            ["dataset", "seed", "synthetic_weight"]
+        ):
+            existing = old[
+                (old.dataset == dataset) & (old.seed == seed) & old.synthetic_weight.eq(weight)
+            ]
             if set(existing.protocol_id) - set(incoming_rows.protocol_id):
                 raise ValueError("Cannot combine different frozen protocols in one comparison")
         incoming = set(map(tuple, table[KEYS].drop_duplicates().to_numpy()))
@@ -223,7 +247,10 @@ def summarize(table: pd.DataFrame) -> pd.DataFrame:
     ``val_*`` are averaged over the models; ``test_*`` come from each seed's validation winner
     (the only model scored on test), as in the baseline.
     """
-    keys = ["arm", "fill_level"]
+    keys = ["arm", "fill_level", "synthetic_weight"]
+    table = table.copy()
+    if "synthetic_weight" not in table:
+        table["synthetic_weight"] = 1.0
     ok = table[table.status == "success"]
     val = ok.groupby([*keys, "seed"])[["val_pr_auc", "val_f1"]].mean().reset_index()
     val = val.groupby(keys)[["val_pr_auc", "val_f1"]].agg(["mean", "std"])
@@ -265,6 +292,9 @@ def plot_summary(summary: pd.DataFrame, path: Path, baseline: dict | None = None
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    summary = summary.copy()
+    if "synthetic_weight" not in summary:
+        summary["synthetic_weight"] = 1.0
     real = summary[summary.arm == REAL_ONLY].iloc[0]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     panels = [
@@ -272,13 +302,23 @@ def plot_summary(summary: pd.DataFrame, path: Path, baseline: dict | None = None
         ("test_f1", "Test F1 at frozen validation thresholds"),
     ]
     for ax, (metric, title) in zip(axes, panels, strict=True):
-        for arm in [a for a in summary.arm.unique() if a != REAL_ONLY]:
-            rows = summary[summary.arm == arm].sort_values("fill_level")
+        for (arm, weight), group in summary[summary.arm.ne(REAL_ONLY)].groupby(
+            ["arm", "synthetic_weight"], sort=False
+        ):
+            rows = group.sort_values("fill_level")
+            label = arm if weight == 1.0 else f"{arm} (weight {weight:g})"
             x = [0.0, *(rows.fill_level * 100)]
             y = [real[f"{metric}_mean"], *rows[f"{metric}_mean"]]
             err = [real[f"{metric}_std"], *rows[f"{metric}_std"]]
             ax.errorbar(
-                x, y, yerr=err, marker="o", lw=1.8, capsize=3, label=arm, color=ARM_COLORS.get(arm)
+                x,
+                y,
+                yerr=err,
+                marker="o",
+                lw=1.8,
+                capsize=3,
+                label=label,
+                color=ARM_COLORS.get(arm),
             )
         if baseline is not None:
             ax.axhline(
@@ -310,6 +350,7 @@ def main() -> None:
     parser.add_argument("--arm-label", help="Name of the arm in the results (default: generator)")
     parser.add_argument("--pool", type=Path, help="CTGAN file with the largest fill level")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    parser.add_argument("--synthetic-weight", type=float, default=1.0)
     parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     parser.add_argument("--no-real-only", action="store_true")
     parser.add_argument("--protocol-dir", type=Path, default=ROOT / "results")
@@ -333,6 +374,7 @@ def main() -> None:
         model_names=args.models,
         include_real_only=not args.no_real_only,
         protocol_dir=args.protocol_dir,
+        synthetic_weight=args.synthetic_weight,
     )
     save_results(table, args.out)
     combined = pd.read_csv(args.out)

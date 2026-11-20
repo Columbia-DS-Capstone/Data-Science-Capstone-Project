@@ -37,7 +37,8 @@ def test_holdout_check_rejects_synthetic_flag_and_overlap(tables):
         check_holdouts(leaked, CONFIG)
 
 
-def test_smotenc_experiment_end_to_end(tables, tmp_path, monkeypatch):
+@pytest.mark.parametrize("weight", [1.0, 0.25])
+def test_smotenc_experiment_end_to_end(tables, tmp_path, monkeypatch, weight):
     def models(seed):
         return {"test model": DummyClassifier(strategy="prior")}
 
@@ -70,7 +71,10 @@ def test_smotenc_experiment_end_to_end(tables, tmp_path, monkeypatch):
         fill_levels=(0.10,),
         model_names=("test model",),
         protocol_dir=tmp_path,
+        synthetic_weight=weight,
     )
+    assert out.synthetic_weight.eq(weight).all()
+    assert out.weight_applied.all()
     assert set(out.arm) == {"real_only", "smotenc"}
     assert (out.status == "success").all()
     assert set(out.threshold) == {0.1}

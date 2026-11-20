@@ -183,3 +183,21 @@ def test_command_line_can_keep_one_seed_of_a_multi_seed_metrics_table(tmp_path):
     finally:
         sys.argv = old
     assert pd.read_csv(out).n_seeds.eq(1).all()
+
+
+def test_chart_uses_the_observed_fine_fill_levels(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    metrics = results()
+    metrics.loc[metrics.fill_level.eq(0.25), "fill_level"] = 0.025
+    captured = []
+    original_close = plt.close
+
+    def capture(fig=None):
+        if hasattr(fig, "axes"):
+            captured.extend(ax.get_xticks().tolist() for ax in fig.axes)
+        original_close(fig)
+
+    monkeypatch.setattr(plt, "close", capture)
+    plot_cross_dataset(comparisons_from_metrics(metrics), tmp_path / "fine.png")
+    assert captured and all(2.5 in ticks and 10 not in ticks for ticks in captured)

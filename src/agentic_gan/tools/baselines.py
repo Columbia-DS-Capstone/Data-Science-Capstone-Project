@@ -27,8 +27,9 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.pipeline import make_pipeline
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.utils.validation import has_fit_parameter
 from threadpoolctl import threadpool_limits
 
 from agentic_gan.tools.preprocessing import Preprocessor, load_dataset, normalize, split_dataset
@@ -86,9 +87,10 @@ def build_models(seed=42):
     models["Stacking ensemble"] = StackingClassifier(
         estimators=[
             ("logistic", LogisticRegression(max_iter=100, tol=0.05, random_state=seed)),
-            ("forest", RandomForestClassifier(
-                n_estimators=10, max_depth=6, n_jobs=1, random_state=seed
-            )),
+            (
+                "forest",
+                RandomForestClassifier(n_estimators=10, max_depth=6, n_jobs=1, random_state=seed),
+            ),
         ],
         final_estimator=LogisticRegression(max_iter=100, tol=0.05, random_state=seed),
         stack_method="predict_proba",
@@ -189,6 +191,81 @@ def _with_preprocessing(estimator, preprocessor):
     return make_pipeline(clone(preprocessor), estimator)
 
 
+class SampleWeightPipeline(Pipeline):
+    """Accept stacking's sample_weight and forward it to the final pipeline step.
+
+    Stacking clones this pipeline for each inner fold and slices the weights to that
+    fold. Preprocessing still fits on the fold's real rows, as in the unweighted path.
+    No global sklearn metadata-routing setting is changed.
+    """
+
+    def fit(self, X, y=None, sample_weight=None, **params):
+        if sample_weight is not None:
+            params[f"{self.steps[-1][0]}__sample_weight"] = sample_weight
+        return super().fit(X, y, **params)
+
+
+def _weight_unsupported(model, name="model"):
+    if isinstance(model, Pipeline):
+        return _weight_unsupported(model.steps[-1][1], f"{name}/{model.steps[-1][0]}")
+    if isinstance(model, StackingClassifier):
+        if model.cv == "prefit":
+            return [f"{name}: prefit base estimators cannot be reweighted"]
+        missing = []
+        for label, base in model.estimators:
+            if not isinstance(base, str):
+                missing.extend(_weight_unsupported(base, f"{name}/{label}"))
+        final = model.final_estimator
+        if final is not None:
+            missing.extend(_weight_unsupported(final, f"{name}/final"))
+        return missing
+    return [] if has_fit_parameter(model, "sample_weight") else [f"{name} ({type(model).__name__})"]
+
+
+def _route_stacking_weights(model):
+    if isinstance(model, Pipeline):
+        _route_stacking_weights(model.steps[-1][1])
+    elif isinstance(model, StackingClassifier):
+        model.estimators = [
+            (label, SampleWeightPipeline(**base.get_params(deep=False)))
+            if isinstance(base, Pipeline)
+            else (label, base)
+            for label, base in model.estimators
+        ]
+
+
+def sample_weight_fit_params(model, sample_weight):
+    """Fit kwargs and whether the requested loss is honored; warn on unsupported models.
+
+    All-unit weights deliberately use the original fit call to preserve exact predictions.
+    A stack is weighted only when every base model and its final estimator support it.
+    """
+    if sample_weight is None or np.all(np.asarray(sample_weight) == 1):
+        return {}, True
+    unsupported = _weight_unsupported(model)
+    if unsupported:
+        warnings.warn(
+            "sample_weight ignored; unsupported estimators: " + ", ".join(unsupported),
+            UserWarning,
+            stacklevel=2,
+        )
+        return {}, False
+    _route_stacking_weights(model)
+    key = f"{model.steps[-1][0]}__sample_weight" if isinstance(model, Pipeline) else "sample_weight"
+    return {key: sample_weight}, True
+
+
+def protocol_with_synthetic_weight(protocol, synthetic_weight=1.0):
+    """Keep frozen thresholds, giving non-default training weights their own protocol id."""
+    if not np.isfinite(synthetic_weight) or not 0 < synthetic_weight <= 1:
+        raise ValueError("synthetic_weight must be greater than 0 and at most 1")
+    if synthetic_weight == 1.0:
+        return dict(protocol)
+    payload = {key: value for key, value in protocol.items() if key != "protocol_id"}
+    payload["synthetic_weight"] = synthetic_weight
+    return {**payload, "protocol_id": _digest(payload)}
+
+
 def run_models(
     X_train,
     y_train,
@@ -202,6 +279,8 @@ def run_models(
     cv_folds=3,
     thresholds=None,
     model_names=None,
+    sample_weight=None,
+    synthetic_weight=1.0,
 ) -> pd.DataFrame:
     """Return one row per model; select on validation PR-AUC, test only the winner.
 
@@ -219,6 +298,14 @@ def run_models(
     Training CV reports only threshold-independent PR-AUC and ROC-AUC.
     """
     _check_inputs(X_train, y_train, X_val, y_val, X_test, y_test, preprocessor, cv_folds)
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=float)
+        if (
+            sample_weight.shape != (len(y_train),)
+            or not np.isfinite(sample_weight).all()
+            or (sample_weight <= 0).any()
+        ):
+            raise ValueError("sample_weight must have one finite positive value per training row")
     models = build_models(seed)
     if model_names is not None:
         if not model_names or len(set(model_names)) != len(model_names):
@@ -244,6 +331,8 @@ def run_models(
                 "cv_folds": cv_folds,
                 "status": "success",
                 "selected": False,
+                "synthetic_weight": synthetic_weight,
+                "weight_applied": False,
                 "error": "",
                 "threshold": thresholds[name] if thresholds is not None else np.nan,
                 "threshold_source": (
@@ -257,6 +346,7 @@ def run_models(
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 try:
+                    fit_params, applied = sample_weight_fit_params(model, sample_weight)
                     if cv is not None:
                         scores = cross_validate(
                             model,
@@ -266,11 +356,13 @@ def run_models(
                             scoring=scoring,
                             n_jobs=1,
                             error_score="raise",
+                            params=fit_params or None,
                         )
                         for metric in scoring:
                             row[f"cv_{metric}_mean"] = float(scores[f"test_{metric}"].mean())
                             row[f"cv_{metric}_sd"] = float(scores[f"test_{metric}"].std(ddof=1))
-                    model.fit(X_train, y_train)
+                    model.fit(X_train, y_train, **fit_params)
+                    row["weight_applied"] = applied
                     probabilities = model.predict_proba(X_val)[:, 1]
                     if thresholds is None:
                         row["threshold"] = select_f1_threshold(y_val, probabilities)

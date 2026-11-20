@@ -141,6 +141,8 @@ def _rules_hash(run: RunDir, protocol: dict) -> str:
         "thresholds": protocol["thresholds"],
         "models": sorted(protocol["models"]),
     }
+    if payload["config"].get("synthetic_weight") == 1.0:
+        payload["config"].pop("synthetic_weight")
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -701,6 +703,7 @@ def _fit_record(
     folder,
     plan=None,
     raw=None,
+    synthetic_weight=1.0,
 ):
     fields = dict(
         arm=arm,
@@ -712,6 +715,8 @@ def _fit_record(
         hyperparameters=json.loads(json.dumps(estimator.get_params(deep=True), default=str)),
         training_rows=len(tables["train"]) + (0 if extra is None else len(extra)),
         synthetic_rows=0 if extra is None else len(extra),
+        synthetic_weight=synthetic_weight,
+        weight_applied=False,
     )
     if error:
         status = Status.SKIPPED if error.startswith("SKIPPED:") else Status.FAILED
@@ -725,7 +730,10 @@ def _fit_record(
         estimator = baselines._with_preprocessing(estimator, ArmEncoder(config, original, plan))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            estimator.fit(X, y)
+            weights = np.where(X[IS_SYNTHETIC].eq(1), synthetic_weight, 1.0)
+            fit_params, applied = baselines.sample_weight_fit_params(estimator, weights)
+            estimator.fit(X, y, **fit_params)
+            fields["weight_applied"] = applied
             predictions, metrics = {}, {}
             for part in ("validation", "test"):
                 features, labels = _model_data(tables[part], config, original=original)
@@ -807,6 +815,8 @@ def _save_metrics(records, dataset, folder):
                     and record.validation_probability_range != 0,
                     "training_rows": record.training_rows,
                     "n_synthetic": record.synthetic_rows,
+                    "synthetic_weight": record.synthetic_weight,
+                    "weight_applied": record.weight_applied,
                     "protocol_id": record.protocol_id,
                     "threshold": record.threshold,
                     **{metric: scores.get(metric, np.nan) for metric in METRICS},
@@ -899,6 +909,8 @@ def _repeated_cv(
                         repeat=repeat,
                         fold=fold,
                         protocol_id=protocol["protocol_id"],
+                        synthetic_weight=cfg.synthetic_weight,
+                        weight_applied=False,
                         status=Status.SUCCESS.value,
                         reason="",
                         pr_auc=np.nan,
@@ -927,7 +939,10 @@ def _repeated_cv(
                             fitted = baselines._with_preprocessing(
                                 model, ArmEncoder(config, arm is Arm.RAW, plan)
                             )
-                            fitted.fit(X, y)
+                            weights = np.where(X[IS_SYNTHETIC].eq(1), cfg.synthetic_weight, 1.0)
+                            params, applied = baselines.sample_weight_fit_params(fitted, weights)
+                            fitted.fit(X, y, **params)
+                            row["weight_applied"] = applied
                             probabilities = fitted.predict_proba(val)[:, 1]
                             probabilities = baselines._probabilities(labels, probabilities)
                             row.update(
@@ -1028,6 +1043,7 @@ def run_training(
             f"{cfg.dataset_name} --arm both --cv-folds 3`."
         )
     config, raw, cleaned, protocol, plan = _inputs(request, run, path)
+    protocol = baselines.protocol_with_synthetic_weight(protocol, cfg.synthetic_weight)
     accepted = {}
     train = cleaned["train"]
     positives = int(train[config.target].sum())
@@ -1077,6 +1093,7 @@ def run_training(
                         folder,
                         plan=plan,
                         raw=raw,
+                        synthetic_weight=cfg.synthetic_weight,
                     )
                     for name, estimator in baselines.build_models(seed).items()
                 ]
