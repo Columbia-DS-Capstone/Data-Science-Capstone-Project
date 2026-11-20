@@ -31,6 +31,7 @@ from agentic_gan.tools.ctgan_sampling import recipe_for, rule_row_filter, sample
 from agentic_gan.tools.quality_fidelity import RULES
 from agentic_gan.tools.quality_privacy import PRIVACY_CHECKS
 from agentic_gan.tools.selection import (
+    DATASET_STRUCTURE,
     STEP_ORDER,
     ColumnSpec,
     DataCharacteristics,
@@ -60,6 +61,15 @@ WGAN_DEFAULTS = {
 }
 # Testing aid: set to False to skip the WGAN-GP backup and go straight to CTGAN.
 WGAN_BACKUP_ENABLED = True
+# Testing aid: set to False to skip TimeGAN and train CTGAN on the same attempt.
+TIMEGAN_ENABLED = True
+# epochs is epochs per phase. 100 finished the Default run in issue #99; 300 would not.
+TIMEGAN_DEFAULTS = {
+    "epochs": 100,
+    "batch_size": 128,
+    "hidden_dim": 48,
+    "device": "cpu",
+}
 # The CTGAN settings a retry may move, each inside its gan_bounds range.
 SETTING_NAMES = ("epochs", "pac", "discriminator_steps", "batch_size")
 KNOB_NAMES = ("sampling_mode", "rule_filter", "rake_columns")
@@ -249,6 +259,7 @@ def attempt_history(request: ModelSelectionInput, run: RunDir) -> list[AttemptRe
     """Earlier attempts' seven knobs and failed hard checks. No writes, no logging, no mutation."""
     decisions = read_decisions(run)
     by_attempt: dict[int, dict] = {}
+    other_generator: set[int] = set()
     if not decisions.empty:
         rows = decisions[
             (decisions["agent"] == "model_selection") & (decisions["rule"] == "hyperparameters")
@@ -257,9 +268,15 @@ def attempt_history(request: ModelSelectionInput, run: RunDir) -> list[AttemptRe
             attempt = int(inputs["attempt"])
             if attempt >= request.attempt:
                 continue
+            # TimeGAN and WGAN-GP rows carry none of CTGAN's seven knobs.
+            if any(name not in inputs for name in SEVEN_KNOBS):
+                other_generator.add(attempt)
+                continue
             by_attempt[attempt] = _seven_knobs_from_inputs(inputs)
 
-    if request.attempt > 1 and 1 not in by_attempt:
+    # A lost CTGAN row for attempt 1 is rebuilt from the recipe. An attempt 1 that trained
+    # another generator is not a CTGAN attempt, so its failed checks stay out of the history.
+    if request.attempt > 1 and 1 not in by_attempt and 1 not in other_generator:
         by_attempt[1] = _recipe_attempt_settings(request.config)
 
     records: list[AttemptRecord] = []
@@ -288,6 +305,7 @@ def _rule_hash(config: RunConfig) -> str:
         "step_order": STEP_ORDER,
         "ctgan_defaults": CTGAN_DEFAULTS,
         "wgan_defaults": WGAN_DEFAULTS,
+        "timegan_defaults": TIMEGAN_DEFAULTS,
         "generator_recipe": asdict(recipe_for(config.dataset_name)),
         "epoch_step": EPOCH_STEP,
         "privacy_checks": sorted(PRIVACY_CHECKS),
@@ -413,6 +431,42 @@ def run_model_selection(
             )
         return _train_wgan_gp(request, run, model_frame, result)
 
+    # TimeGAN has no settings ladder. Attempt 1 trains it; a raise or a later attempt
+    # continues into CTGAN below, where the first CTGAN attempt trains the dataset recipe.
+    # The WGAN-GP backup stays on the CTGAN route only.
+    if result.generator == "timegan":
+        if TIMEGAN_ENABLED and request.attempt == 1:
+            try:
+                return _train_timegan(request, run, model_frame, result)
+            except RuleOverrideError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _cleanup_timegan_attempt(run, request.attempt)
+                err_msg = f"{type(exc).__name__}: {str(exc)[:300]}"
+                log_decision(
+                    "model_selection", "backup_failed",
+                    {"attempt": request.attempt, "generator": "timegan", "error": err_msg},
+                    "FALLBACK_CTGAN",
+                    "TimeGAN raised, so this attempt trains CTGAN.",
+                    run=run,
+                )
+        elif not TIMEGAN_ENABLED:
+            log_decision(
+                "model_selection", "timegan_skipped",
+                {"attempt": request.attempt, "generator": "timegan"},
+                "DISABLED",
+                "TIMEGAN_ENABLED is false, so this attempt trains CTGAN.",
+                run=run,
+            )
+        else:
+            log_decision(
+                "model_selection", "retry_not_applicable",
+                {"attempt": request.attempt, "generator": "timegan"},
+                "NOT_APPLIED",
+                "TimeGAN has no retry ladder; a failed quality gate trains CTGAN.",
+                run=run,
+            )
+
     # CTGAN route — attempt 3 may use the WGAN-GP backup.
     if result.generator == "ctgan" and request.attempt >= 3:
         eligible, reason = backup_eligible(result)
@@ -469,14 +523,27 @@ def run_model_selection(
         return GeneratorOutput(status=Status.SKIPPED, reason=reason, rationale=reason)
 
     if request.attempt >= 2:
-        # A failed or ineligible WGAN backup continues through the CTGAN retry ladder.
-        settings, _exhausted = _propose_retry(
-            request,
-            run,
-            client,
-            discrete_columns=discrete,
-            allowed_rake=allowed_rake,
-        )
+        if result.generator == "timegan" and not attempt_history(request, run):
+            # The failed checks so far are TimeGAN's. The ladder adjusts CTGAN settings to
+            # CTGAN failures, so the first CTGAN attempt trains the recipe as it stands.
+            settings = _recipe_attempt_settings(request.config)
+            log_decision(
+                "model_selection", "fallback_recipe",
+                {"attempt": request.attempt, "generator": "ctgan", "settings": settings},
+                "RECIPE",
+                "No CTGAN attempt has run yet, so CTGAN trains the dataset recipe unchanged. "
+                "Retry adjustments start on the next attempt.",
+                run=run,
+            )
+        else:
+            # A failed or ineligible WGAN backup continues through the CTGAN retry ladder.
+            settings, _exhausted = _propose_retry(
+                request,
+                run,
+                client,
+                discrete_columns=discrete,
+                allowed_rake=allowed_rake,
+            )
     return _train_ctgan(request, run, model_frame, settings, result)
 
 
@@ -712,6 +779,127 @@ def _train_wgan_gp(
         loss_history_path=loss_path.resolve(),
         synthetic_sets=sets,
     )
+
+
+def _train_timegan(
+    request: ModelSelectionInput,
+    run: RunDir,
+    train: pd.DataFrame,
+    result: SelectionResult,
+) -> GeneratorOutput:
+    from agentic_gan.tools.timegan import (  # noqa: PLC0415
+        sample_timegan,
+        save_model,
+        step_columns_from_wide,
+        train_timegan,
+    )
+
+    dataset = request.config.dataset_name
+    target = request.config.target
+    positive = _positive_class(request.config.positive_class, train[target])
+    structure = DATASET_STRUCTURE[dataset]
+    wide = structure.wide_temporal
+    n_steps = structure.steps
+    if n_steps is None:
+        raise ValueError(f"{dataset} has no recorded step count for TimeGAN")
+    # DEFAULT_WIDE_TEMPORAL is newest-first (month 1, then month 6).
+    step_columns = step_columns_from_wide(wide, n_steps, newest_first=True)
+    wide_names = set(wide)
+    static_columns = [name for name in train.columns if name != target and name not in wide_names]
+    folder = run.subdir("synthetic")
+    attempt = request.attempt
+    checkpoint = folder / f"timegan_attempt_{attempt}.pkl"
+    loss_path = folder / f"timegan_loss_attempt_{attempt}.csv"
+    positives = request.preprocess.baseline_train_positives
+    negatives = request.preprocess.baseline_train_negatives
+    counts = [fill_rows(level, positives, negatives) for level in request.config.fill_levels]
+    if any(count < 1 for count in counts):
+        reason = "A fill level rounds to no rows, so nothing is generated."
+        log_decision(
+            "model_selection", "fill_rows",
+            {"attempt": attempt, "counts": counts},
+            "SKIPPED", reason, run=run,
+        )
+        return GeneratorOutput(status=Status.SKIPPED, reason=reason, rationale=reason)
+    log_decision(
+        "model_selection", "hyperparameters",
+        {
+            "attempt": attempt,
+            **TIMEGAN_DEFAULTS,
+            "seed": request.config.split_seed,
+            "generator": "timegan",
+            "training_rows": len(train),
+        },
+        "SET", "TimeGAN settings.", run=run,
+    )
+    model = train_timegan(
+        train,
+        target,
+        static_columns,
+        step_columns,
+        log_path=loss_path,
+        seed=request.config.split_seed,
+        **TIMEGAN_DEFAULTS,
+    )
+    save_model(model, checkpoint)
+    rules = RULES.get(dataset, ())
+
+    def keep_positive(frame: pd.DataFrame) -> pd.Series:
+        mask = frame[target].eq(positive)
+        if rules:
+            mask = mask & rule_row_filter(rules)(frame)
+        return mask
+
+    pool = sample_timegan(
+        model,
+        max(counts),
+        seed=request.config.split_seed,
+        row_filter=keep_positive,
+        drop_duplicates_of=train,
+    )
+    if IS_SYNTHETIC not in pool.columns:
+        pool = pool.copy()
+        pool[IS_SYNTHETIC] = 1
+    sets = []
+    for level, count in zip(request.config.fill_levels, counts, strict=True):
+        sample = pool.head(count)
+        if len(sample) != count:
+            raise ValueError(
+                f"synthetic rows {len(sample)} do not match fill_rows {count} at {level}"
+            )
+        path = folder / f"fill_{_level_token(level)}_attempt_{attempt}.csv"
+        sample.to_csv(path, index=False)
+        sets.append(SyntheticSet(fill_level=level, rows=count, path=path.resolve()))
+    return GeneratorOutput(
+        status=Status.SUCCESS,
+        generator="timegan",
+        rationale=result.rationale,
+        hyperparameters={
+            "attempt": attempt,
+            **TIMEGAN_DEFAULTS,
+            "seed": request.config.split_seed,
+            "generator": "timegan",
+        },
+        checkpoint_path=checkpoint.resolve(),
+        loss_history_path=loss_path.resolve(),
+        synthetic_sets=sets,
+    )
+
+
+def _cleanup_timegan_attempt(run: RunDir, attempt: int) -> None:
+    """Remove partial TimeGAN files written for this attempt after a training failure."""
+    folder = run.subdir("synthetic")
+    for path in [
+        folder / f"timegan_attempt_{attempt}.pkl",
+        folder / f"timegan_loss_attempt_{attempt}.csv",
+    ]:
+        if path.exists():
+            path.unlink()
+    for path in folder.glob(f"fill_*_attempt_{attempt}.csv"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _cleanup_wgan_attempt(run: RunDir, attempt: int) -> None:

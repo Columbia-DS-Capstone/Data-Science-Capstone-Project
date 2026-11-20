@@ -315,10 +315,10 @@ def select_generator(
         add(
             "fallback",
             "DOCUMENTED",
-            "TimeGAN is not implemented. Documented fallback is CTGAN.",
+            "TimeGAN is implemented. CTGAN is the fallback if TimeGAN fails.",
             {"fallback": "ctgan"},
         )
-        return chosen("timegan", False, "ctgan", rationale, scope)
+        return chosen("timegan", True, "ctgan", rationale, scope)
 
     failed = [name for name, value in conditions.items() if value == "FAIL"]
     add(
