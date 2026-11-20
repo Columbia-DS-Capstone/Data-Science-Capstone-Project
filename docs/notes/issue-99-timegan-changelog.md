@@ -267,3 +267,90 @@ Nothing failed in this step.
 - **The autoencoder loss flattened at about 2.47 after 75 steps in the 2,000-row check**, then
   fell again to 1.18 in the joint phase. Whether it breaks through with more steps is
   something the full run's loss curve will show.
+
+## Entry 3 — 2026-11-20 — Step 3 sampler
+
+### Built
+
+- `src/agentic_gan/tools/timegan.py`: `_generate` (uniform noise, then generator, supervisor,
+  recovery, `from_sequences`) and `sample_timegan` with the issue's signature. The round loop
+  is a copy of `sample_wgan_gp` (`wgan_gp.py` lines 490 to 600): each round asks for
+  `need / max(keep rate, 0.02) * 1.2 + 10` rows, capped at 100,000; applies `row_filter`;
+  drops duplicates when `drop_duplicates_of` is given; stops at `n`; after `max_rounds` it
+  logs a warning and returns the rows it has. `wgan_gp.py` is untouched.
+- Output: the training frame's columns in order with their dtypes, then `is_synthetic = 1`.
+- `tests/tools/test_timegan.py`: 52 new tests in `TestSampleTimeGAN`, `TestRowFilter`,
+  `TestDropDuplicates` and `TestSampleArguments`, and a `varied` fixture (see Failed).
+
+### Worked
+
+- `uv run pytest tests/tools/test_timegan.py`: 155 passed in 18.45 s, run outside the
+  sandbox. This is pass criterion 1 of the issue.
+- `uv run ruff check src/agentic_gan/tools/timegan.py tests/tools/test_timegan.py`: all checks
+  passed. Whole tree: still the 51 baseline errors in `src/agentic_gan/web.py`.
+- Every test in the step's list is there: columns and order, dtypes, `n` rows, valid static
+  categories, `PAY_*` in `DEFAULT_PAY_CODES`, zero `DEFAULT_RULES` violations, same seed same
+  rows, different seed different rows, weights unchanged, save then load gives the same
+  sample, a `y == 1` filter returns only `y == 1`, no returned row equals a training row, an
+  impossible filter with `max_rounds=2` returns an empty frame with the right columns and
+  dtypes, `n <= 0` raises.
+- Guards beyond the list: the rows equal a hand-computed noise, generator, supervisor,
+  recovery pass; sampling neither reads nor advances torch's global random state; networks
+  stay in eval mode; the request sizes are 34 then 1,210 when nothing survives, and never
+  above 100,000; duplicates within one sample are dropped.
+- The tests were checked by breaking the sampler in seven ways (skip the supervisor, flag 0,
+  ignore the filter, no in-sample duplicate check, ignore the seed, seed the global state,
+  wrong keep-rate floor). Each break failed a test. The breaks were not committed.
+
+### Failed
+
+- **The 2-epoch toy model returns one row repeated.** 1,000 samples gave 1 distinct row, no
+  `y == 1`, and a standard deviation of 0.0000 at the recovery output. The tests for
+  "different seed, different rows" and "a `y == 1` filter" cannot pass on that model, and
+  they should not be weakened. So those tests use a second fixture, `varied`: the same toy
+  table, 12 epochs per phase at batch size 32 (108 steps per phase, about 5.5 s). It gives
+  400 distinct rows in 400 and both classes. The fixture asserts this itself, so it fails
+  loudly if a later change makes the model collapse again. The validity tests run on both
+  models.
+- **The collapse is under-training, not a wiring fault.** Variety grows with training:
+
+  | Data | Epochs per phase | Distinct rows in 1,000 | `y == 1` share (real) | Distinct values: SEX, EDUCATION, MARRIAGE, PAY_1, AGE | Std at recovery (real) |
+  | --- | --- | --- | --- | --- | --- |
+  | toy, 300 rows | 2 | 1 | 0.000 (0.220) | 1, 1, 1, 1, 1 | 0.0000 (0.3464) |
+  | toy, 300 rows | 20 | 1,000 | 0.000 (0.220) | 1, 1, 1, 1, 1 | not recorded |
+  | toy, 300 rows | 60 | 1,000 | 0.412 (0.220) | 2, 3, 4, 2, 8 | 0.1508 (0.3464) |
+  | real, first 2,000 rows | 10 | 1,000 | 0.260 (0.225) | 2, 1, 2, 3, 6 | 0.1024 (0.2028) |
+  | real, first 2,000 rows | 40 | 1,000 | 0.187 (0.225) | 2, 1, 2, 4, 29 | 0.1529 (0.2028) |
+
+  Batch size 128 throughout, so the toy rows are 2 steps per epoch and the real rows 15.
+
+### Decisions
+
+- **Differences from `sample_wgan_gp`, all deliberate:**
+  - It does not call `torch.manual_seed`. The noise comes from a fresh `torch.Generator`
+    seeded with `seed`, so sampling leaves the caller's random state alone.
+  - The generator is created on the model's device.
+  - `max_rounds < 1` is a `ValueError`, so there is always at least one round.
+  - The filter's result goes through `np.asarray(..., dtype=bool)`, so a Series or an array
+    both work.
+  - `drop_duplicates_of` without one of the model's columns is a `ValueError`. Extra columns
+    are ignored.
+- **Same as `sample_wgan_gp`:** duplicates, both against `drop_duplicates_of` and within the
+  sample, are dropped only when `drop_duplicates_of` is given. Without it, repeated rows are
+  returned. The Step 5 runner passes the train frame, so the fill file gets both checks.
+- **`row_filter` sees the decoded frame without `is_synthetic`**, the same columns as the
+  training frame.
+- The test file now takes about 18 s, up from about 12 s, because of the `varied` fixture.
+
+### Open questions
+
+- **Category variety is the main risk for the full run.** After 40 epochs on 2,000 real rows
+  the samples still had one EDUCATION value where the real rows have several, and the spread
+  at the recovery output was 75% of the real spread. The full run has 140 steps per epoch, so
+  it trains far more, but the fidelity scorecard in Step 6 may fail on the categorical
+  columns. The issue says the scorecard need not pass the gate; the result is still to be
+  reported as measured.
+- **Share of `y == 1` rows moves with training** (0.26, then 0.19 on real rows). The fill
+  needs 1,004 positive rows, so the runner's `y == 1` filter may discard 75% to 80% of the
+  rows drawn. The sampler's overshoot handles that; the cost is sampling time, which Step 5
+  will show.

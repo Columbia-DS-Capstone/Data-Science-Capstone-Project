@@ -2,6 +2,7 @@
 
 Step 1: the data layer (step columns, layout, scaling, decoding, validation, save and load).
 Step 2: the five networks and the three-phase training loop.
+Step 3: the sampler.
 The toy table has the shape of the cleaned Default training split without ``source_row``.
 """
 
@@ -795,3 +796,285 @@ class TestTrainArguments:
             _train(frame)
         with pytest.raises(ValueError, match="target_col"):
             _timegan().train_timegan(toy_df, "label", STATIC, _default_steps(), epochs=1)
+
+
+# ===========================================================================
+# Step 3: sampler
+# ===========================================================================
+
+IS_SYNTHETIC = "is_synthetic"
+
+
+@pytest.fixture(scope="module")
+def varied(toy_df):
+    """A model trained long enough (108 steps per phase) to give varied rows of both classes.
+
+    After 2 epochs every sampled row is the same: an untrained stack of GRUs shrinks the noise
+    to almost nothing. The tests that need different rows use this model instead.
+    """
+    model = _train(toy_df, epochs=12, batch_size=32)
+    rows = _timegan().sample_timegan(model, 200, seed=0)
+    assert not rows[COLUMNS].duplicated().any()
+    assert set(rows[TARGET]) == {0, 1}
+    return model
+
+
+@pytest.fixture(scope="module", params=["two_epochs", "varied"])
+def model(request, trained):
+    """Validity must hold for the 2-epoch model of the issue and for the varied one."""
+    return trained[0] if request.param == "two_epochs" else request.getfixturevalue("varied")
+
+
+def _sample(model, n=40, **kwargs):
+    kwargs.setdefault("seed", 0)
+    return _timegan().sample_timegan(model, n, **kwargs)
+
+
+def _repeat_one_row(monkeypatch, row: pd.DataFrame) -> list[int]:
+    """Make every generated row equal ``row``; return the list of row counts requested."""
+    requests: list[int] = []
+
+    def generate(model, rows, rng):
+        requests.append(rows)
+        return pd.concat([row] * rows, ignore_index=True)
+
+    monkeypatch.setattr(_timegan(), "_generate", generate)
+    return requests
+
+
+class TestSampleTimeGAN:
+    def test_signature_is_the_one_in_the_issue(self):
+        parameters = list(inspect.signature(_timegan().sample_timegan).parameters.values())
+        assert [p.name for p in parameters] == [
+            "model", "n", "seed", "row_filter", "drop_duplicates_of", "max_rounds",
+        ]
+        assert all(p.kind is p.KEYWORD_ONLY for p in parameters[2:])
+        assert parameters[2].default is inspect.Parameter.empty
+        assert {p.name: p.default for p in parameters[3:]} == {
+            "row_filter": None, "drop_duplicates_of": None, "max_rounds": 100,
+        }
+
+    def test_columns_and_order_equal_the_training_frame(self, model, toy_df):
+        out = _sample(model)
+        assert list(out.columns) == [*toy_df.columns, IS_SYNTHETIC]
+
+    def test_dtypes_match_the_training_frame(self, model, toy_df):
+        out = _sample(model)
+        assert out[COLUMNS].dtypes.to_dict() == toy_df.dtypes.to_dict()
+        assert out[IS_SYNTHETIC].dtype == np.int64
+
+    def test_returns_n_flagged_rows_without_missing_values(self, model):
+        out = _sample(model, 57)
+        assert len(out) == 57
+        assert out.index.tolist() == list(range(57))
+        assert (out[IS_SYNTHETIC] == 1).all()
+        assert not out.isna().any().any()
+
+    def test_static_values_are_valid_categories(self, model, toy_df):
+        out = _sample(model, 200)
+        for name, codes in STATIC_CODES.items():
+            assert set(out[name]) <= codes
+            assert set(out[name]) <= set(toy_df[name])
+        assert set(out[TARGET]) <= {0, 1}
+
+    def test_pay_status_is_inside_the_default_codes(self, model):
+        out = _sample(model, 200)
+        for name in PAY:
+            assert set(out[name]) <= DEFAULT_PAY_CODES
+
+    def test_no_default_rule_is_broken(self, model):
+        assert _violations(_sample(model, 200)) == {rule.name: 0.0 for rule in DEFAULT_RULES}
+
+    def test_continuous_values_stay_in_the_training_range(self, model, toy_df):
+        out = _sample(model, 200)
+        for name in ("LIMIT_BAL", "AGE"):
+            assert out[name].between(toy_df[name].min(), toy_df[name].max()).all()
+        for group in (BILL, PAID):
+            low, high = toy_df[group].min().min(), toy_df[group].max().max()
+            assert ((out[group] >= low) & (out[group] <= high)).all().all()
+
+    def test_rows_are_noise_through_generator_supervisor_and_recovery(self, model):
+        import torch
+
+        tg = _timegan()
+        rng = torch.Generator().manual_seed(8)
+        # The first round for n=20 asks for 20 * 1.2 + 10 = 34 rows of uniform noise.
+        noise = torch.rand(34, model.layout.n_steps, model.params["noise_dim"], generator=rng)
+        with torch.no_grad():
+            sequences = model.recovery(model.supervisor(model.generator(noise)))
+        expected = tg.from_sequences(sequences.numpy(), model.layout).head(20)
+        pd.testing.assert_frame_equal(_sample(model, 20, seed=8)[COLUMNS], expected)
+
+    def test_same_seed_gives_the_same_rows(self, model):
+        pd.testing.assert_frame_equal(_sample(model, seed=10), _sample(model, seed=10))
+
+    def test_different_seed_gives_different_rows(self, varied):
+        first, second = _sample(varied, seed=10), _sample(varied, seed=11)
+        assert not (first.to_numpy() == second.to_numpy()).all(axis=1).all()
+
+    def test_rows_do_not_depend_on_the_global_random_state(self, varied):
+        import torch
+
+        torch.manual_seed(1)
+        first = _sample(varied, seed=10)
+        torch.manual_seed(2)
+        pd.testing.assert_frame_equal(first, _sample(varied, seed=10))
+
+    def test_sampling_leaves_the_global_random_state_alone(self, varied):
+        import torch
+
+        torch.manual_seed(3)
+        expected = torch.rand(4)
+        torch.manual_seed(3)
+        _sample(varied, seed=10)
+        assert torch.equal(torch.rand(4), expected)
+
+    def test_weights_are_unchanged_by_sampling(self, model):
+        import torch
+
+        before = _weights(model)
+        modes = [network.training for network in model.networks]
+        _sample(model, seed=20)
+        _sample(model, seed=21)
+        after = _weights(model)
+        for key, value in before.items():
+            assert torch.equal(value, after[key]), key
+        assert [network.training for network in model.networks] == modes
+
+    def test_save_then_load_gives_the_same_sample(self, model, tmp_path):
+        tg = _timegan()
+        expected = _sample(model, seed=30)
+        path = tmp_path / "saved" / "timegan.pkl"
+        tg.save_model(model, path)
+        loaded = tg.load_model(path)
+        pd.testing.assert_frame_equal(_sample(loaded, seed=30), expected)
+        assert loaded.params == model.params
+        pd.testing.assert_frame_equal(loaded.loss_history, model.loss_history)
+
+
+class TestRowFilter:
+    def test_filter_keeping_positives_returns_only_positives(self, varied):
+        out = _sample(varied, 50, row_filter=lambda frame: frame[TARGET] == 1)
+        assert len(out) == 50
+        assert (out[TARGET] == 1).all()
+
+    def test_filter_sees_the_training_columns_without_is_synthetic(self, varied):
+        seen: list[list[str]] = []
+
+        def keep_all(frame: pd.DataFrame) -> pd.Series:
+            seen.append(list(frame.columns))
+            return pd.Series(True, index=frame.index)
+
+        _sample(varied, 10, row_filter=keep_all)
+        assert seen == [COLUMNS]
+
+    def test_filter_may_return_a_plain_array(self, varied):
+        out = _sample(varied, 20, row_filter=lambda frame: (frame[TARGET] == 0).to_numpy())
+        assert len(out) == 20
+        assert (out[TARGET] == 0).all()
+
+    def test_filtered_rows_are_the_unfiltered_rows_that_pass(self, varied):
+        """The first round draws the same rows with or without a filter."""
+        everything = _sample(varied, 34, seed=5)  # the first request for n=20 is 34 rows
+        passing = everything[everything[TARGET] == 0].reset_index(drop=True)
+        out = _sample(varied, 20, seed=5, row_filter=lambda frame: frame[TARGET] == 0)
+        shared = min(len(passing), 20)
+        assert shared > 0
+        pd.testing.assert_frame_equal(out.head(shared), passing.head(shared))
+
+    def test_impossible_filter_returns_an_empty_frame_with_the_columns(
+        self, model, toy_df, caplog
+    ):
+        import logging
+
+        def impossible(frame: pd.DataFrame) -> pd.Series:
+            return pd.Series(False, index=frame.index)
+
+        with caplog.at_level(logging.WARNING, logger="agentic_gan.tools.timegan"):
+            out = _sample(model, 50, row_filter=impossible, max_rounds=2)
+        assert len(out) == 0
+        assert list(out.columns) == [*COLUMNS, IS_SYNTHETIC]
+        assert out[COLUMNS].dtypes.to_dict() == toy_df.dtypes.to_dict()
+        assert any("Only 0 of 50 valid synthetic rows after 2 rounds" in m for m in caplog.messages)
+
+    def test_request_size_follows_the_keep_rate(self, trained, toy_df, monkeypatch):
+        requests = _repeat_one_row(monkeypatch, toy_df.head(1))
+        _sample(
+            trained[0], 20, row_filter=lambda f: pd.Series(False, index=f.index), max_rounds=2
+        )
+        # Round 1 assumes every row survives: 20 * 1.2 + 10. Round 2 saw none survive, so the
+        # keep rate is floored at 0.02: 20 / 0.02 * 1.2 + 10.
+        assert requests == [34, 1210]
+
+    def test_request_size_is_capped(self, trained, toy_df, monkeypatch):
+        requests = _repeat_one_row(monkeypatch, toy_df.head(1))
+        out = _sample(trained[0], 200_000, max_rounds=1)
+        assert requests == [100_000]
+        assert len(out) == 100_000
+
+
+class TestDropDuplicates:
+    def test_no_returned_row_equals_a_training_row(self, varied, toy_df):
+        out = _sample(varied, 60, seed=4, drop_duplicates_of=toy_df)
+        assert len(out) == 60
+        assert out[COLUMNS].merge(toy_df, on=COLUMNS, how="inner").empty
+        assert not out[COLUMNS].duplicated().any()
+
+    def test_rows_listed_as_duplicates_are_skipped(self, varied):
+        """Sampling again while forbidding the first 10 rows returns the rows after them."""
+        first = _sample(varied, 30, seed=4)
+        forbidden = first.head(10)  # carries is_synthetic too; extra columns are ignored
+        again = _sample(varied, 30, seed=4, drop_duplicates_of=forbidden)
+        assert len(again) == 30
+        assert again[COLUMNS].merge(forbidden[COLUMNS], on=COLUMNS, how="inner").empty
+        pd.testing.assert_frame_equal(
+            again.head(20), first.iloc[10:30].reset_index(drop=True)
+        )
+
+    def test_a_copy_of_a_training_row_is_never_returned(self, trained, toy_df, monkeypatch, caplog):
+        import logging
+
+        _repeat_one_row(monkeypatch, toy_df.iloc[[7]])
+        with caplog.at_level(logging.WARNING, logger="agentic_gan.tools.timegan"):
+            out = _sample(trained[0], 5, drop_duplicates_of=toy_df, max_rounds=3)
+        assert len(out) == 0
+        assert list(out.columns) == [*COLUMNS, IS_SYNTHETIC]
+        assert any("Only 0 of 5" in m for m in caplog.messages)
+
+    def test_duplicates_within_the_sample_are_dropped(self, trained, toy_df, monkeypatch):
+        _repeat_one_row(monkeypatch, toy_df.iloc[[7]])
+        out = _sample(trained[0], 5, drop_duplicates_of=toy_df.iloc[:0], max_rounds=3)
+        assert len(out) == 1
+        pd.testing.assert_frame_equal(out[COLUMNS], toy_df.iloc[[7]].reset_index(drop=True))
+
+    def test_duplicates_are_kept_when_no_frame_is_given(self, trained, toy_df, monkeypatch):
+        """As in wgan_gp.py: the duplicate check runs only with drop_duplicates_of."""
+        _repeat_one_row(monkeypatch, toy_df.iloc[[7]])
+        out = _sample(trained[0], 5)
+        assert len(out) == 5
+        assert out[COLUMNS].duplicated().sum() == 4
+
+    def test_frame_without_the_training_columns_raises(self, trained, toy_df):
+        with pytest.raises(ValueError, match=r"drop_duplicates_of is missing columns: \['AGE'\]"):
+            _sample(trained[0], 5, drop_duplicates_of=toy_df.drop(columns="AGE"))
+
+
+class TestSampleArguments:
+    @pytest.mark.parametrize("n", [0, -1, 2.5, True, None])
+    def test_n_must_be_a_positive_integer(self, trained, n):
+        with pytest.raises(ValueError, match="n must be a positive integer"):
+            _timegan().sample_timegan(trained[0], n, seed=0)
+
+    @pytest.mark.parametrize("seed", ["1", 1.0, None])
+    def test_seed_must_be_an_int(self, trained, seed):
+        with pytest.raises(ValueError, match="seed must be an int"):
+            _timegan().sample_timegan(trained[0], 5, seed=seed)
+
+    @pytest.mark.parametrize("max_rounds", [0, -3, 1.5])
+    def test_max_rounds_must_be_positive(self, trained, max_rounds):
+        with pytest.raises(ValueError, match="max_rounds must be a positive integer"):
+            _sample(trained[0], 5, max_rounds=max_rounds)
+
+    def test_seed_is_required(self, trained):
+        with pytest.raises(TypeError, match="seed"):
+            _timegan().sample_timegan(trained[0], 5)

@@ -2,8 +2,10 @@
 
 ``train_timegan`` fits a standard TimeGAN (Yoon, Jarrett and van der Schaar, 2019) on the
 training split it is given, both classes together: the target is modelled as one more
-feature. The first half of this file is the layout that turns the table into sequences and
-back; the second half is the five networks and the three training phases.
+feature. ``sample_timegan`` draws whole synthetic rows from the fitted model, of either
+class; a caller that wants one class passes a ``row_filter``. The file has three parts: the
+layout that turns the table into sequences and back, the five networks with the three
+training phases, and the sampler.
 
 Layout
 ------
@@ -46,6 +48,13 @@ The loss history has one row per phase and epoch (so ``3 * epochs`` rows) with t
 of each loss; a loss that a phase does not compute is NaN. ``Embedder Loss`` is the loss the
 embedder-and-recovery update minimised, ``Supervised Loss`` the next-step error, ``Generator
 Loss`` and ``Discriminator Loss`` the joint-phase totals.
+
+Sampling
+--------
+Uniform noise goes through the generator, the supervisor and the recovery, and the result is
+decoded by the layout, so every row has the training frame's columns, order and dtypes, with
+valid codes and in-range values. Rows are drawn in rounds until ``n`` survive the optional
+``row_filter`` and duplicate check, as in ``tools/wgan_gp.py``.
 """
 
 from __future__ import annotations
@@ -53,7 +62,7 @@ from __future__ import annotations
 import logging
 import pickle
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +74,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from agentic_gan.tools.ctgan_sampling import CODED_MAX_VALUES
+from agentic_gan.utils.synthetic import IS_SYNTHETIC
 
 __all__ = [
     "CODED_MAX_VALUES",
@@ -73,6 +83,7 @@ __all__ = [
     "DISCRIMINATOR_THRESHOLD",
     "GENERATOR_STEPS",
     "HIDDEN_DIM_RANGE",
+    "IS_SYNTHETIC",
     "LOSS_COLUMNS",
     "PHASES",
     "Discriminator",
@@ -85,6 +96,7 @@ __all__ = [
     "fit_layout",
     "from_sequences",
     "load_model",
+    "sample_timegan",
     "save_model",
     "step_columns_from_wide",
     "to_sequences",
@@ -765,3 +777,108 @@ def train_timegan(
         train_seconds=train_seconds,
         n_train_rows=n_rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sampler
+# ---------------------------------------------------------------------------
+
+def _generate(model: TrainedTimeGAN, rows: int, rng: torch.Generator) -> pd.DataFrame:
+    """``rows`` decoded rows: noise -> generator -> supervisor -> recovery -> layout."""
+    layout = model.layout
+    noise = torch.rand(
+        rows, layout.n_steps, model.params["noise_dim"], generator=rng, device=rng.device
+    )
+    with torch.no_grad():
+        sequences = model.recovery(model.supervisor(model.generator(noise)))
+    return from_sequences(sequences.cpu().numpy(), layout)
+
+
+def sample_timegan(
+    model: TrainedTimeGAN,
+    n: int,
+    *,
+    seed: int,
+    row_filter: Callable[[pd.DataFrame], pd.Series] | None = None,
+    drop_duplicates_of: pd.DataFrame | None = None,
+    max_rounds: int = 100,
+) -> pd.DataFrame:
+    """Sample ``n`` synthetic rows from a fitted TimeGAN.
+
+    The rows have the training frame's columns, order and dtypes, with the target as the model
+    generated it (either class), then ``is_synthetic = 1``. ``row_filter`` takes such a table,
+    without ``is_synthetic``, and returns True for the rows to keep; use it to keep one class
+    or to drop rows that break a consistency rule. With ``drop_duplicates_of``, a row equal to
+    one of its rows, or to a row already kept, is dropped.
+
+    A fresh ``torch.Generator`` seeded from ``seed`` is created, so the output is reproducible
+    and independent of earlier calls and of the global random state. Each round overshoots the
+    need by 20 % plus 10 rows, capped at 100,000, guided by the share of generated rows that
+    survived the filter so far. If ``max_rounds`` are exhausted with fewer than ``n`` rows,
+    logs a warning and returns what is available; the caller decides how to handle the
+    shortfall.
+
+    The model is not mutated.
+    """
+    if not _is_whole(n) or n <= 0:
+        raise ValueError("n must be a positive integer")
+    if not _is_whole(seed):
+        raise ValueError("seed must be an int")
+    if not _is_whole(max_rounds) or max_rounds < 1:
+        raise ValueError("max_rounds must be a positive integer")
+
+    columns = model.columns
+    seen: set[tuple] = set()
+    if drop_duplicates_of is not None:
+        absent = [name for name in columns if name not in drop_duplicates_of.columns]
+        if absent:
+            raise ValueError(f"drop_duplicates_of is missing columns: {absent}")
+        seen.update(map(tuple, drop_duplicates_of[columns].itertuples(index=False)))
+
+    rng = torch.Generator(device=next(model.generator.parameters()).device)
+    rng.manual_seed(seed)
+
+    kept: list[pd.DataFrame] = []
+    total = 0
+    drawn = 0
+    usable = 0
+    keep_rate = 1.0
+
+    for _ in range(max_rounds):
+        need = n - total
+        request = min(int(need / max(keep_rate, 0.02) * 1.2) + 10, 100_000)
+        batch = _generate(model, request, rng)
+        drawn += len(batch)
+
+        if row_filter is not None:
+            mask = np.asarray(row_filter(batch), dtype=bool)
+            batch = batch[mask].reset_index(drop=True)
+
+        usable += len(batch)
+
+        if drop_duplicates_of is not None:
+            keep_rows: list[bool] = []
+            for row in batch.itertuples(index=False):
+                key = tuple(row)
+                if key not in seen:
+                    seen.add(key)
+                    keep_rows.append(True)
+                else:
+                    keep_rows.append(False)
+            batch = batch[keep_rows].reset_index(drop=True)
+
+        kept.append(batch.head(need))
+        total += len(kept[-1])
+        keep_rate = usable / max(drawn, 1)
+
+        if total >= n:
+            break
+    else:
+        logger.warning(
+            "Only %d of %d valid synthetic rows after %d rounds",
+            total, n, max_rounds,
+        )
+
+    out = pd.concat(kept, ignore_index=True).head(n)
+    out[IS_SYNTHETIC] = 1
+    return out[[*columns, IS_SYNTHETIC]].reset_index(drop=True)
