@@ -1,0 +1,172 @@
+{
+  "settings": {
+    "epochs_per_phase": 100,
+    "seed": 42,
+    "device": "cpu",
+    "hidden_dim": 48,
+    "batch_size": 128
+  },
+  "model_params": {
+    "epochs": 100,
+    "batch_size": 128,
+    "hidden_dim": 48,
+    "seed": 42,
+    "device": "cpu",
+    "num_layers": 3,
+    "noise_dim": 9,
+    "gamma": 1.0,
+    "lr": 0.001,
+    "generator_steps": 2,
+    "discriminator_threshold": 0.15,
+    "steps_per_epoch": 140
+  },
+  "data_note": "Trained on data/interim/default/train_cleaned.csv only. The validation and test splits were not read by this script.",
+  "sequence_layout": {
+    "steps": 6,
+    "order": "oldest month first: suffix 6 (April 2005) to suffix 1 (September 2005)",
+    "step_columns": [
+      [
+        "PAY_6",
+        "BILL_AMT6",
+        "PAY_AMT6"
+      ],
+      [
+        "PAY_5",
+        "BILL_AMT5",
+        "PAY_AMT5"
+      ],
+      [
+        "PAY_4",
+        "BILL_AMT4",
+        "PAY_AMT4"
+      ],
+      [
+        "PAY_3",
+        "BILL_AMT3",
+        "PAY_AMT3"
+      ],
+      [
+        "PAY_2",
+        "BILL_AMT2",
+        "PAY_AMT2"
+      ],
+      [
+        "PAY_1",
+        "BILL_AMT1",
+        "PAY_AMT1"
+      ]
+    ],
+    "static_columns": [
+      "LIMIT_BAL",
+      "SEX",
+      "EDUCATION",
+      "MARRIAGE",
+      "AGE"
+    ],
+    "target": "y"
+  },
+  "wall_time_seconds": 1541.6,
+  "train_seconds_reported_by_model": 1540.8,
+  "torch_threads": 8,
+  "n_train_rows": 18000,
+  "n_positive_rows": 3982,
+  "n_negative_rows": 14018,
+  "fill_level": 0.1,
+  "fill_count": 1004,
+  "loss_final": {
+    "autoencoder": {
+      "Embedder Loss": 0.5001358349408422
+    },
+    "supervised": {
+      "Supervised Loss": 0.0005560673885546
+    },
+    "joint": {
+      "Generator Loss": 13.796841430664063,
+      "Discriminator Loss": 1.102859783598355,
+      "Embedder Loss": 0.2803218139601605,
+      "Supervised Loss": 0.0022320980364124
+    }
+  },
+  "diagnostic_unfiltered_sample": {
+    "rows": 5000,
+    "seed": 43,
+    "positive_share": 0.124,
+    "real_positive_share": 0.2212222222222222,
+    "rule_violation_rates": {
+      "pay_status_codes": 0.0,
+      "pay_amount_non_negative": 0.0,
+      "static_codes": 0.0,
+      "any_rule": 0.0
+    },
+    "unique_row_share": 1.0,
+    "exact_train_copies": 0,
+    "distinct_values": {
+      "SEX": {
+        "real": 2,
+        "synthetic": 2
+      },
+      "EDUCATION": {
+        "real": 7,
+        "synthetic": 5
+      },
+      "MARRIAGE": {
+        "real": 4,
+        "synthetic": 3
+      },
+      "PAY_1": {
+        "real": 11,
+        "synthetic": 9
+      },
+      "PAY_2": {
+        "real": 10,
+        "synthetic": 9
+      },
+      "PAY_3": {
+        "real": 11,
+        "synthetic": 8
+      },
+      "PAY_4": {
+        "real": 11,
+        "synthetic": 8
+      },
+      "PAY_5": {
+        "real": 10,
+        "synthetic": 10
+      },
+      "PAY_6": {
+        "real": 10,
+        "synthetic": 8
+      }
+    }
+  },
+  "fill_sampler": {
+    "seed": 42,
+    "filter": "no DEFAULT_RULES broken and y == 1",
+    "drop_duplicates_of": "the training split",
+    "rounds": 2,
+    "rows_drawn": 9995,
+    "rows_passing_filter": 1217,
+    "keep_rate": 0.12176088044022011,
+    "rows_returned": 1004,
+    "sampling_seconds": 0.18
+  },
+  "fill_file": "data/interim/default/synthetic/default_timegan_fill10.csv",
+  "fill_file_checks": {
+    "row_count_equals_fill_count": true,
+    "columns_are_train_columns_plus_is_synthetic": true,
+    "dtypes_match_train": true,
+    "every_target_is_positive": true,
+    "every_is_synthetic_is_1": true,
+    "no_missing_values": true,
+    "no_exact_copy_of_a_train_row": true,
+    "no_repeated_row": true,
+    "no_default_rule_broken": true
+  },
+  "library_versions": {
+    "python": "3.12.12",
+    "torch": "2.14.1",
+    "numpy": "2.5.3",
+    "pandas": "3.0.6",
+    "matplotlib": "3.11.2"
+  }
+}
