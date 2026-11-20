@@ -1,11 +1,13 @@
 """Tests for tools/timegan.py.
 
 Step 1: the data layer (step columns, layout, scaling, decoding, validation, save and load).
+Step 2: the five networks and the three-phase training loop.
 The toy table has the shape of the cleaned Default training split without ``source_row``.
 """
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -477,3 +479,319 @@ class TestSaveLoad:
         for before, after in zip(model.networks, loaded.networks, strict=True):
             for key, value in before.state_dict().items():
                 assert torch.equal(value, after.state_dict()[key])
+
+
+# ===========================================================================
+# Step 2: networks and training
+# ===========================================================================
+
+NETWORK_NAMES = ("embedder", "recovery", "supervisor", "generator", "discriminator")
+LOSS_COLUMNS = ["Embedder Loss", "Supervised Loss", "Generator Loss", "Discriminator Loss"]
+
+
+def _train(frame: pd.DataFrame, **kwargs):
+    """Train a small TimeGAN quickly: 2 epochs per phase unless told otherwise."""
+    settings = {"epochs": 2, "seed": 42}
+    settings.update(kwargs)
+    return _timegan().train_timegan(frame, TARGET, STATIC, _default_steps(), **settings)
+
+
+def _weights(model) -> dict[str, object]:
+    return {
+        f"{name}.{key}": value.clone()
+        for name in NETWORK_NAMES
+        for key, value in getattr(model, name).state_dict().items()
+    }
+
+
+@pytest.fixture(scope="module")
+def trained(toy_df, tmp_path_factory):
+    """One 2-epoch model for the read-only tests, and the loss log it wrote."""
+    log = tmp_path_factory.mktemp("timegan") / "nested" / "dir" / "losses.csv"
+    return _train(toy_df, log_path=log), log
+
+
+def _track_adam(monkeypatch):
+    """Record every Adam optimiser created, in order, and how often each one steps."""
+    import torch
+
+    created: list = []
+    steps: dict[int, int] = {}
+    original_init = torch.optim.Adam.__init__
+    original_step = torch.optim.Adam.step
+
+    def tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+        steps[id(self)] = 0
+
+    def tracked_step(self, closure=None):
+        steps[id(self)] += 1
+        return original_step(self, closure)
+
+    monkeypatch.setattr(torch.optim.Adam, "__init__", tracked_init)
+    monkeypatch.setattr(torch.optim.Adam, "step", tracked_step)
+    return created, steps
+
+
+class TestNetworks:
+    def test_shapes_and_ranges(self):
+        import torch
+
+        tg = _timegan()
+        torch.manual_seed(0)
+        x = torch.rand(4, 6, 9)
+        hidden = tg.Embedder(9, 48, 3)(x)
+        assert hidden.shape == (4, 6, 48)
+        assert (hidden > 0).all() and (hidden < 1).all()
+        back = tg.Recovery(48, 9, 3)(hidden)
+        assert back.shape == (4, 6, 9)
+        assert (back > 0).all() and (back < 1).all()
+        nxt = tg.Supervisor(48, 3)(hidden)
+        assert nxt.shape == (4, 6, 48)
+        assert (nxt > 0).all() and (nxt < 1).all()
+        made = tg.SequenceGenerator(9, 48, 3)(torch.rand(4, 6, 9))
+        assert made.shape == (4, 6, 48)
+        assert (made > 0).all() and (made < 1).all()
+        assert tg.Discriminator(48, 3)(hidden).shape == (4, 6)
+
+    def test_every_network_is_a_batch_first_gru(self):
+        import torch.nn as nn
+
+        tg = _timegan()
+        nets = [
+            tg.Embedder(9, 24, 3), tg.Recovery(24, 9, 3), tg.Supervisor(24, 3),
+            tg.SequenceGenerator(9, 24, 3), tg.Discriminator(24, 3),
+        ]
+        for net in nets:
+            assert isinstance(net.gru, nn.GRU)
+            assert net.gru.batch_first
+            assert net.gru.hidden_size == 24
+
+    def test_supervisor_has_one_layer_fewer(self):
+        tg = _timegan()
+        assert tg.Embedder(9, 24, 3).gru.num_layers == 3
+        assert tg.Supervisor(24, 3).gru.num_layers == 2
+        assert tg.Supervisor(24, 1).gru.num_layers == 1
+
+    def test_discriminator_returns_logits_not_probabilities(self):
+        import torch
+
+        net = _timegan().Discriminator(24, 3)
+        with torch.no_grad():
+            net.linear.bias.fill_(50.0)
+            out = net(torch.rand(4, 6, 24))
+        assert (out > 1).all()
+
+
+class TestTrainTimeGAN:
+    def test_signature_is_the_one_in_the_issue(self):
+        parameters = list(inspect.signature(_timegan().train_timegan).parameters.values())
+        assert [p.name for p in parameters] == [
+            "train_df", "target_col", "static_columns", "step_columns",
+            "epochs", "batch_size", "hidden_dim", "seed", "device", "log_path",
+        ]
+        assert all(p.kind is p.POSITIONAL_OR_KEYWORD for p in parameters[:4])
+        assert all(p.kind is p.KEYWORD_ONLY for p in parameters[4:])
+        assert parameters[4].default is inspect.Parameter.empty
+        assert {p.name: p.default for p in parameters[5:]} == {
+            "batch_size": 128, "hidden_dim": 48, "seed": 42, "device": "cpu", "log_path": None,
+        }
+
+    def test_returns_a_trained_model_with_the_five_networks(self, trained):
+        tg = _timegan()
+        model, _ = trained
+        assert isinstance(model, tg.TrainedTimeGAN)
+        assert isinstance(model.embedder, tg.Embedder)
+        assert isinstance(model.recovery, tg.Recovery)
+        assert isinstance(model.supervisor, tg.Supervisor)
+        assert isinstance(model.generator, tg.SequenceGenerator)
+        assert isinstance(model.discriminator, tg.Discriminator)
+
+    def test_six_loss_rows_in_phase_order(self, trained):
+        history = trained[0].loss_history
+        assert list(history.columns) == ["Phase", "Epoch", *LOSS_COLUMNS]
+        assert history["Phase"].tolist() == [
+            "autoencoder", "autoencoder", "supervised", "supervised", "joint", "joint",
+        ]
+        assert history["Epoch"].tolist() == [1, 2, 1, 2, 1, 2]
+
+    def test_a_loss_a_phase_does_not_compute_is_nan(self, trained):
+        history = trained[0].loss_history.set_index(["Phase", "Epoch"])[LOSS_COLUMNS]
+        applies = {
+            "autoencoder": ["Embedder Loss"],
+            "supervised": ["Supervised Loss"],
+            "joint": LOSS_COLUMNS,
+        }
+        for (phase, _), row in history.iterrows():
+            for column in LOSS_COLUMNS:
+                if column in applies[phase]:
+                    assert np.isfinite(row[column]), (phase, column)
+                else:
+                    assert np.isnan(row[column]), (phase, column)
+
+    def test_log_file_is_written_and_matches_the_history(self, trained):
+        model, log = trained
+        assert log.exists()
+        pd.testing.assert_frame_equal(pd.read_csv(log), model.loss_history)
+
+    def test_one_epoch_gives_three_rows(self, toy_df):
+        history = _train(toy_df, epochs=1).loss_history
+        assert history["Phase"].tolist() == ["autoencoder", "supervised", "joint"]
+
+    def test_same_seed_gives_identical_history_and_weights(self, toy_df):
+        import torch
+
+        first, second = _train(toy_df, seed=5), _train(toy_df, seed=5)
+        pd.testing.assert_frame_equal(first.loss_history, second.loss_history)
+        a, b = _weights(first), _weights(second)
+        assert a.keys() == b.keys()
+        for key in a:
+            assert torch.equal(a[key], b[key]), key
+
+    def test_different_seed_gives_different_history_and_weights(self, toy_df):
+        import torch
+
+        first, second = _train(toy_df, seed=5), _train(toy_df, seed=6)
+        assert not first.loss_history[LOSS_COLUMNS].equals(second.loss_history[LOSS_COLUMNS])
+        a, b = _weights(first), _weights(second)
+        for name in NETWORK_NAMES:
+            keys = [key for key in a if key.startswith(f"{name}.")]
+            assert any(not torch.equal(a[key], b[key]) for key in keys), name
+
+    def test_input_frame_is_unchanged(self, toy_df):
+        before = toy_df.copy()
+        _train(toy_df, epochs=1)
+        pd.testing.assert_frame_equal(toy_df, before)
+
+    def test_bookkeeping(self, trained, toy_df, layout):
+        model, _ = trained
+        assert model.n_train_rows == ROWS
+        assert model.train_seconds > 0
+        assert model.layout == layout
+        assert model.target_col == TARGET
+        assert model.static_columns == STATIC
+        assert model.step_columns == _default_steps()
+        assert model.columns == COLUMNS
+        assert model.dtypes == toy_df.dtypes.astype(str).to_dict()
+        assert model.params == {
+            "epochs": 2, "batch_size": 128, "hidden_dim": 48, "seed": 42, "device": "cpu",
+            "num_layers": 3, "noise_dim": 9, "gamma": 1.0, "lr": 1e-3,
+            "generator_steps": 2, "discriminator_threshold": 0.15, "steps_per_epoch": 2,
+        }
+
+    def test_networks_are_returned_in_eval_mode(self, trained):
+        assert not any(network.training for network in trained[0].networks)
+
+    def test_hidden_dim_sets_the_network_width(self, toy_df):
+        for hidden_dim in (24, 64):
+            model = _train(toy_df, epochs=1, hidden_dim=hidden_dim)
+            assert model.embedder.gru.hidden_size == hidden_dim
+            assert model.recovery.linear.out_features == 9
+            assert model.generator.gru.input_size == 9
+
+    def test_batch_size_larger_than_the_table_still_trains(self, toy_df):
+        model = _train(toy_df.head(40), epochs=1, batch_size=256)
+        assert model.params["steps_per_epoch"] == 1
+        assert len(model.loss_history) == 3
+
+    def test_training_lowers_the_losses_it_minimises(self, toy_df):
+        """Seeded, so deterministic: 15 epochs is 30 steps per phase on the toy table."""
+        history = _train(toy_df, epochs=15).loss_history.set_index(["Phase", "Epoch"])
+        reconstruction = history.loc["autoencoder", "Embedder Loss"]
+        next_step = history.loc["supervised", "Supervised Loss"]
+        assert reconstruction.iloc[-1] < reconstruction.iloc[0]
+        assert next_step.iloc[-1] < next_step.iloc[0]
+
+    def test_each_update_steps_the_right_networks_the_right_number_of_times(
+        self, toy_df, monkeypatch
+    ):
+        created, steps = _track_adam(monkeypatch)
+        model = _train(toy_df)  # 300 rows, batch 128: 2 steps per epoch, 2 epochs per phase
+
+        def ids(*names):
+            return {id(p) for name in names for p in getattr(model, name).parameters()}
+
+        def held(optimiser):
+            return {id(p) for group in optimiser.param_groups for p in group["params"]}
+
+        assert len(created) == 5
+        autoencoder, supervisor, generator, embedder, discriminator = created
+        assert held(autoencoder) == ids("embedder", "recovery")
+        assert held(supervisor) == ids("supervisor")
+        assert held(generator) == ids("generator", "supervisor")
+        assert held(embedder) == ids("embedder", "recovery")
+        assert held(discriminator) == ids("discriminator")
+        # Joint phase: per step, two generator updates and two embedder updates, then one
+        # discriminator update (its loss starts near 3 * log 2, well above the threshold).
+        assert [steps[id(o)] for o in created] == [4, 4, 8, 8, 4]
+
+    def test_discriminator_is_not_updated_at_or_below_the_threshold(self, toy_df, monkeypatch):
+        tg = _timegan()
+        created, steps = _track_adam(monkeypatch)
+        monkeypatch.setattr(tg, "DISCRIMINATOR_THRESHOLD", 1e9)
+        model = _train(toy_df)
+        assert steps[id(created[4])] == 0
+        assert [steps[id(o)] for o in created[:4]] == [4, 4, 8, 8]
+        assert np.isfinite(model.loss_history["Discriminator Loss"].iloc[-1])
+
+    @pytest.mark.parametrize(
+        ("helper", "phase"),
+        [
+            ("_reconstruction_loss", "autoencoder"),
+            ("_supervised_loss", "supervised"),
+            ("_moment_loss", "joint"),
+        ],
+    )
+    def test_non_finite_loss_raises_naming_phase_and_epoch(
+        self, toy_df, monkeypatch, helper, phase
+    ):
+        import torch
+
+        tg = _timegan()
+
+        def nan():
+            return torch.tensor(float("nan"), requires_grad=True)
+
+        replacements = {
+            "_reconstruction_loss": lambda real, embedder, recovery: (nan(), embedder(real)),
+            "_supervised_loss": lambda hidden, supervisor: nan(),
+            "_moment_loss": lambda generated, real: nan(),
+        }
+        monkeypatch.setattr(tg, helper, replacements[helper])
+        with pytest.raises(RuntimeError, match=f"diverged in the {phase} phase at epoch 1"):
+            _train(toy_df)
+
+
+class TestTrainArguments:
+    @pytest.mark.parametrize(
+        ("settings", "message"),
+        [
+            ({"epochs": 0}, "epochs"),
+            ({"epochs": 1.5}, "epochs"),
+            ({"batch_size": 1}, "batch_size"),
+            ({"hidden_dim": 23}, "hidden_dim must be a whole number from 24 to 64"),
+            ({"hidden_dim": 65}, "hidden_dim must be a whole number from 24 to 64"),
+            ({"device": "mps"}, "device"),
+            ({"seed": "42"}, "seed"),
+            ({"seed": 1.0}, "seed"),
+        ],
+    )
+    def test_bad_settings_raise(self, toy_df, settings, message):
+        with pytest.raises(ValueError, match=message):
+            _train(toy_df, **settings)
+
+    def test_epochs_is_required(self, toy_df):
+        with pytest.raises(TypeError, match="epochs"):
+            _timegan().train_timegan(toy_df, TARGET, STATIC, _default_steps())
+
+    def test_settings_are_keyword_only(self, toy_df):
+        with pytest.raises(TypeError):
+            _timegan().train_timegan(toy_df, TARGET, STATIC, _default_steps(), 2)
+
+    def test_frame_errors_reach_the_caller(self, toy_df):
+        frame = toy_df.assign(source_row=np.arange(len(toy_df)))
+        with pytest.raises(ValueError, match="source_row"):
+            _train(frame)
+        with pytest.raises(ValueError, match="target_col"):
+            _timegan().train_timegan(toy_df, "label", STATIC, _default_steps(), epochs=1)

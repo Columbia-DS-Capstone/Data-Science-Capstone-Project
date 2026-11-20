@@ -1,5 +1,12 @@
-"""Dataset-agnostic TimeGAN tool: the layout that turns a wide table into sequences and back.
+"""Dataset-agnostic TimeGAN tool: train on a wide table whose rows hold a short sequence.
 
+``train_timegan`` fits a standard TimeGAN (Yoon, Jarrett and van der Schaar, 2019) on the
+training split it is given, both classes together: the target is modelled as one more
+feature. The first half of this file is the layout that turns the table into sequences and
+back; the second half is the five networks and the three training phases.
+
+Layout
+------
 A wide table stores each entity's history as repeated column groups. Default of Credit Card
 has three such groups (repayment status, bill amount, payment amount), each with one column
 per month. Here every row becomes a sequence of ``steps`` x ``features`` numbers:
@@ -21,11 +28,31 @@ training rows did not allow.
 
 Sequences are float32. An integer-valued feature decodes exactly as long as its range is
 below 2**24 (about 16.7 million).
+
+Training
+--------
+Five GRU networks: the embedder maps a sequence to a hidden sequence and the recovery maps it
+back; the supervisor predicts the next hidden step; the generator maps uniform noise to a
+hidden sequence; the discriminator scores each hidden step as real or generated. Training
+runs three phases, each for ``epochs`` epochs:
+
+1. ``autoencoder``: embedder and recovery learn to reconstruct the real sequences;
+2. ``supervised``: the supervisor learns the next hidden step, with the embedder frozen;
+3. ``joint``: per step, two generator-and-supervisor updates, each followed by an
+   embedder-and-recovery update, then one discriminator update, which is skipped while the
+   discriminator's loss is at or below ``DISCRIMINATOR_THRESHOLD``.
+
+The loss history has one row per phase and epoch (so ``3 * epochs`` rows) with the epoch mean
+of each loss; a loss that a phase does not compute is NaN. ``Embedder Loss`` is the loss the
+embedder-and-recovery update minimised, ``Supervised Loss`` the next-step error, ``Generator
+Loss`` and ``Discriminator Loss`` the joint-phase totals.
 """
 
 from __future__ import annotations
 
+import logging
 import pickle
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +60,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from agentic_gan.tools.ctgan_sampling import CODED_MAX_VALUES
 
@@ -41,8 +70,17 @@ __all__ = [
     "CODED_MAX_VALUES",
     "DEFAULTS",
     "DEVICES",
+    "DISCRIMINATOR_THRESHOLD",
+    "GENERATOR_STEPS",
     "HIDDEN_DIM_RANGE",
+    "LOSS_COLUMNS",
+    "PHASES",
+    "Discriminator",
+    "Embedder",
+    "Recovery",
+    "SequenceGenerator",
     "SequenceLayout",
+    "Supervisor",
     "TrainedTimeGAN",
     "fit_layout",
     "from_sequences",
@@ -50,7 +88,10 @@ __all__ = [
     "save_model",
     "step_columns_from_wide",
     "to_sequences",
+    "train_timegan",
 ]
+
+logger = logging.getLogger(__name__)
 
 # Settings that are not part of the public training signature.
 DEFAULTS: dict[str, Any] = {
@@ -61,6 +102,11 @@ DEFAULTS: dict[str, Any] = {
 }
 HIDDEN_DIM_RANGE = (24, 64)
 DEVICES = ("cpu", "cuda", "auto")
+PHASES = ("autoencoder", "supervised", "joint")
+LOSS_COLUMNS = ("Embedder Loss", "Supervised Loss", "Generator Loss", "Discriminator Loss")
+GENERATOR_STEPS = 2  # generator (and embedder) updates per discriminator update, joint phase
+DISCRIMINATOR_THRESHOLD = 0.15  # the discriminator is updated only while its loss is above this
+_SQRT_FLOOR = 1e-8  # keeps the gradient of sqrt(loss) finite if a loss reaches exactly zero
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +433,335 @@ def load_model(path: str | Path) -> TrainedTimeGAN:
     """Reload a model written by ``save_model``.  Only load files you created."""
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+
+class _SequenceNet(nn.Module):
+    """A GRU over the steps, then one linear layer applied at every step."""
+
+    def __init__(
+        self, in_dim: int, hidden_dim: int, out_dim: int, num_layers: int, *, squash: bool
+    ) -> None:
+        super().__init__()
+        self.gru = nn.GRU(in_dim, hidden_dim, num_layers=num_layers, batch_first=True)
+        self.linear = nn.Linear(hidden_dim, out_dim)
+        self.squash = squash
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.gru(x)
+        out = self.linear(out)
+        return torch.sigmoid(out) if self.squash else out
+
+
+class Embedder(_SequenceNet):
+    """Real sequence (batch, steps, features) -> hidden sequence, each value in (0, 1)."""
+
+    def __init__(self, n_features: int, hidden_dim: int, num_layers: int) -> None:
+        super().__init__(n_features, hidden_dim, hidden_dim, num_layers, squash=True)
+
+
+class Recovery(_SequenceNet):
+    """Hidden sequence -> sequence of features, each value in (0, 1) like the scaled data."""
+
+    def __init__(self, hidden_dim: int, n_features: int, num_layers: int) -> None:
+        super().__init__(hidden_dim, hidden_dim, n_features, num_layers, squash=True)
+
+
+class Supervisor(_SequenceNet):
+    """Hidden sequence -> the next hidden step at each position. One GRU layer fewer."""
+
+    def __init__(self, hidden_dim: int, num_layers: int) -> None:
+        super().__init__(hidden_dim, hidden_dim, hidden_dim, max(num_layers - 1, 1), squash=True)
+
+
+class SequenceGenerator(_SequenceNet):
+    """Noise sequence (batch, steps, noise_dim) -> hidden sequence, each value in (0, 1)."""
+
+    def __init__(self, noise_dim: int, hidden_dim: int, num_layers: int) -> None:
+        super().__init__(noise_dim, hidden_dim, hidden_dim, num_layers, squash=True)
+
+
+class Discriminator(_SequenceNet):
+    """Hidden sequence -> one logit per step (batch, steps). No sigmoid: the losses take logits."""
+
+    def __init__(self, hidden_dim: int, num_layers: int) -> None:
+        super().__init__(hidden_dim, hidden_dim, 1, num_layers, squash=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return super().forward(x).squeeze(-1)
+
+
+# ---------------------------------------------------------------------------
+# Losses (the weights 10, 100 and 0.1 are those of the TimeGAN reference code)
+# ---------------------------------------------------------------------------
+
+def _reconstruction_loss(
+    real: torch.Tensor, embedder: nn.Module, recovery: nn.Module
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``10 * sqrt(MSE(X, R(E(X))))`` and the hidden sequence ``E(X)`` it was computed from."""
+    hidden = embedder(real)
+    error = F.mse_loss(recovery(hidden), real)
+    return 10.0 * torch.sqrt(error + _SQRT_FLOOR), hidden
+
+
+def _supervised_loss(hidden: torch.Tensor, supervisor: nn.Module) -> torch.Tensor:
+    """``MSE(H[:, 1:], S(H)[:, :-1])``: how well the supervisor predicts the next hidden step."""
+    return F.mse_loss(supervisor(hidden)[:, :-1], hidden[:, 1:])
+
+
+def _batch_std(x: torch.Tensor) -> torch.Tensor:
+    return torch.sqrt(x.var(dim=0, correction=0) + 1e-6)
+
+
+def _moment_loss(generated: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+    """Mean gap between the batch standard deviations plus the mean gap between the means."""
+    spread = (_batch_std(generated) - _batch_std(real)).abs().mean()
+    centre = (generated.mean(dim=0) - real.mean(dim=0)).abs().mean()
+    return spread + centre
+
+
+def _adversarial_loss(logits: torch.Tensor, *, real: bool) -> torch.Tensor:
+    """Binary cross-entropy of the discriminator's logits against "real" or "generated"."""
+    labels = torch.ones_like(logits) if real else torch.zeros_like(logits)
+    return F.binary_cross_entropy_with_logits(logits, labels)
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+def _epoch_row(phase: str, epoch: int, **means: float) -> dict[str, Any]:
+    """One loss-history row. Raises if any epoch mean is not finite."""
+    broken = [name for name, value in means.items() if not np.isfinite(value)]
+    if broken:
+        raise RuntimeError(
+            f"TimeGAN diverged in the {phase} phase at epoch {epoch}: "
+            f"non-finite {', '.join(broken)}"
+        )
+    row: dict[str, Any] = {"Phase": phase, "Epoch": epoch}
+    row.update({column: float("nan") for column in LOSS_COLUMNS})
+    row.update(means)
+    return row
+
+
+def _autoencoder_phase(embedder, recovery, optimiser, batch, steps, epochs) -> list[dict]:
+    rows = []
+    for epoch in range(1, epochs + 1):
+        losses = []
+        for _ in range(steps):
+            loss, _ = _reconstruction_loss(batch(), embedder, recovery)
+            optimiser.zero_grad()
+            loss.backward()
+            optimiser.step()
+            losses.append(loss.item())
+        rows.append(_epoch_row("autoencoder", epoch, **{"Embedder Loss": float(np.mean(losses))}))
+    return rows
+
+
+def _supervised_phase(embedder, supervisor, optimiser, batch, steps, epochs) -> list[dict]:
+    rows = []
+    for epoch in range(1, epochs + 1):
+        losses = []
+        for _ in range(steps):
+            with torch.no_grad():  # the embedder is frozen in this phase
+                hidden = embedder(batch())
+            loss = _supervised_loss(hidden, supervisor)
+            optimiser.zero_grad()
+            loss.backward()
+            optimiser.step()
+            losses.append(loss.item())
+        rows.append(
+            _epoch_row("supervised", epoch, **{"Supervised Loss": float(np.mean(losses))})
+        )
+    return rows
+
+
+def _joint_phase(networks, optimisers, batch, noise, steps, epochs, gamma) -> list[dict]:
+    embedder, recovery, supervisor, generator, discriminator = networks
+    generator_opt, embedder_opt, discriminator_opt = optimisers
+    rows = []
+    for epoch in range(1, epochs + 1):
+        history: dict[str, list[float]] = {column: [] for column in LOSS_COLUMNS}
+        for _ in range(steps):
+            for _ in range(GENERATOR_STEPS):
+                real = batch()
+
+                # Generator and supervisor. The embedder is not updated here, so H is a constant.
+                with torch.no_grad():
+                    hidden = embedder(real)
+                generated_embedding = generator(noise())
+                generated_hidden = supervisor(generated_embedding)
+                generated = recovery(generated_hidden)
+                supervised = _supervised_loss(hidden, supervisor)
+                generator_loss = (
+                    _adversarial_loss(discriminator(generated_hidden), real=True)
+                    + gamma * _adversarial_loss(discriminator(generated_embedding), real=True)
+                    + 100.0 * torch.sqrt(supervised + _SQRT_FLOOR)
+                    + 100.0 * _moment_loss(generated, real)
+                )
+                generator_opt.zero_grad()
+                generator_loss.backward()
+                generator_opt.step()
+
+                # Embedder and recovery, on the same real batch.
+                reconstruction, hidden = _reconstruction_loss(real, embedder, recovery)
+                embedder_loss = reconstruction + 0.1 * _supervised_loss(hidden, supervisor)
+                embedder_opt.zero_grad()
+                embedder_loss.backward()
+                embedder_opt.step()
+
+                history["Supervised Loss"].append(supervised.item())
+                history["Generator Loss"].append(generator_loss.item())
+                history["Embedder Loss"].append(embedder_loss.item())
+
+            # Discriminator, on fresh batches. Nothing upstream of it is updated here.
+            with torch.no_grad():
+                hidden = embedder(batch())
+                generated_embedding = generator(noise())
+                generated_hidden = supervisor(generated_embedding)
+            discriminator_loss = (
+                _adversarial_loss(discriminator(hidden), real=True)
+                + _adversarial_loss(discriminator(generated_hidden), real=False)
+                + gamma * _adversarial_loss(discriminator(generated_embedding), real=False)
+            )
+            if discriminator_loss.item() > DISCRIMINATOR_THRESHOLD:
+                discriminator_opt.zero_grad()
+                discriminator_loss.backward()
+                discriminator_opt.step()
+            history["Discriminator Loss"].append(discriminator_loss.item())
+
+        rows.append(
+            _epoch_row(
+                "joint", epoch, **{column: float(np.mean(history[column])) for column in history}
+            )
+        )
+    return rows
+
+
+def train_timegan(
+    train_df: pd.DataFrame,
+    target_col: str,
+    static_columns: Sequence[str],
+    step_columns: Sequence[Sequence[str]],
+    *,
+    epochs: int,
+    batch_size: int = 128,
+    hidden_dim: int = 48,
+    seed: int = 42,
+    device: str = "cpu",
+    log_path: str | Path | None = None,
+) -> TrainedTimeGAN:
+    """Fit TimeGAN on every row of ``train_df``, which must be the training split only.
+
+    ``step_columns`` holds one list of column names per step, oldest step first, each with the
+    same features in the same order. ``static_columns`` are the per-entity columns. Every
+    column of ``train_df`` except the target must appear in exactly one of the two.
+
+    ``epochs`` is the number of epochs of each of the three phases. An epoch is
+    ``max(rows // batch_size, 1)`` steps, each on a batch drawn with replacement. The loss
+    history (one row per phase and epoch) is returned on the model and written to ``log_path``
+    as CSV when given. ``train_df`` is not changed.
+    """
+    _validate_args(epochs, batch_size, hidden_dim, device)
+    if not _is_whole(seed):
+        raise ValueError(f"seed must be a whole number, got {seed!r}")
+    layout = fit_layout(train_df, target_col, static_columns, step_columns)
+    use = "cuda" if device == "cuda" or (device == "auto" and torch.cuda.is_available()) else "cpu"
+
+    # Seed before the networks are built: their initial weights come from the global state.
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    real = torch.tensor(to_sequences(train_df, layout), dtype=torch.float32, device=use)
+    n_rows, n_steps, n_features = real.shape
+    num_layers = DEFAULTS["num_layers"]
+    noise_dim = DEFAULTS["noise_dim"] or n_features
+    gamma, lr = DEFAULTS["gamma"], DEFAULTS["lr"]
+
+    embedder = Embedder(n_features, hidden_dim, num_layers).to(use)
+    recovery = Recovery(hidden_dim, n_features, num_layers).to(use)
+    supervisor = Supervisor(hidden_dim, num_layers).to(use)
+    generator = SequenceGenerator(noise_dim, hidden_dim, num_layers).to(use)
+    discriminator = Discriminator(hidden_dim, num_layers).to(use)
+    networks = (embedder, recovery, supervisor, generator, discriminator)
+
+    def adam(*modules: nn.Module) -> torch.optim.Adam:
+        return torch.optim.Adam([p for module in modules for p in module.parameters()], lr=lr)
+
+    # One optimiser per kind of update, as in the reference code. Created in this order.
+    autoencoder_opt = adam(embedder, recovery)  # autoencoder phase
+    supervisor_opt = adam(supervisor)  # supervised phase
+    generator_opt = adam(generator, supervisor)  # joint phase
+    embedder_opt = adam(embedder, recovery)  # joint phase
+    discriminator_opt = adam(discriminator)  # joint phase
+
+    # Dedicated generator for batch indices and noise; it does not consume the global state.
+    rng = torch.Generator(device=use)
+    rng.manual_seed(seed)
+
+    def batch() -> torch.Tensor:
+        return real[torch.randint(0, n_rows, (batch_size,), generator=rng, device=use)]
+
+    def noise() -> torch.Tensor:
+        return torch.rand(batch_size, n_steps, noise_dim, generator=rng, device=use)
+
+    steps = max(n_rows // batch_size, 1)
+    for network in networks:
+        network.train()
+    start = time.perf_counter()
+    rows = _autoencoder_phase(embedder, recovery, autoencoder_opt, batch, steps, epochs)
+    rows += _supervised_phase(embedder, supervisor, supervisor_opt, batch, steps, epochs)
+    rows += _joint_phase(
+        networks,
+        (generator_opt, embedder_opt, discriminator_opt),
+        batch,
+        noise,
+        steps,
+        epochs,
+        gamma,
+    )
+    train_seconds = time.perf_counter() - start
+    for network in networks:
+        network.eval()
+
+    loss_history = pd.DataFrame(rows, columns=["Phase", "Epoch", *LOSS_COLUMNS])
+    if log_path is not None:
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        loss_history.to_csv(log_path, index=False)
+
+    final = loss_history.iloc[-1]
+    logger.info(
+        "TimeGAN trained on %d rows, %d steps x %d features, device=%s in %.1fs; "
+        "final G=%.3f D=%.3f E=%.3f",
+        n_rows, n_steps, n_features, use, train_seconds,
+        final["Generator Loss"], final["Discriminator Loss"], final["Embedder Loss"],
+    )
+
+    return TrainedTimeGAN(
+        embedder=embedder,
+        recovery=recovery,
+        supervisor=supervisor,
+        generator=generator,
+        discriminator=discriminator,
+        layout=layout,
+        target_col=target_col,
+        static_columns=list(layout.static_columns),
+        step_columns=[list(step) for step in layout.step_columns],
+        columns=list(layout.columns),
+        dtypes=dict(layout.dtypes),
+        params={
+            "epochs": epochs, "batch_size": batch_size, "hidden_dim": hidden_dim,
+            "seed": seed, "device": device, "num_layers": num_layers,
+            "noise_dim": noise_dim, "gamma": gamma, "lr": lr,
+            "generator_steps": GENERATOR_STEPS,
+            "discriminator_threshold": DISCRIMINATOR_THRESHOLD,
+            "steps_per_epoch": steps,
+        },
+        loss_history=loss_history,
+        train_seconds=train_seconds,
+        n_train_rows=n_rows,
+    )

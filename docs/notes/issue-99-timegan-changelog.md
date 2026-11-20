@@ -190,3 +190,80 @@ uv run pytest tests/tools/test_timegan.py tests/tools/test_wgan_gp.py -q
 - **Amount scaling, now measured.** On the real train split the median scaled payment amount
   is 0.0016 and the median scaled bill amount is 0.19. This confirms the Step 0 concern that
   min-max scaling leaves the payment amounts crowded near 0.
+
+## Entry 2 — 2026-11-20 — Step 2 networks and training
+
+### Built
+
+In `src/agentic_gan/tools/timegan.py`:
+
+- Five networks on one shared base (`_SequenceNet`: a batch-first GRU, then a linear layer at
+  every step): `Embedder`, `Recovery`, `Supervisor` (one GRU layer fewer), `SequenceGenerator`,
+  `Discriminator` (one logit per step, no sigmoid).
+- Loss helpers `_reconstruction_loss`, `_supervised_loss`, `_moment_loss`, `_adversarial_loss`.
+- `_autoencoder_phase`, `_supervised_phase`, `_joint_phase`, and `train_timegan` with the
+  issue's exact signature.
+- Constants `PHASES`, `LOSS_COLUMNS`, `GENERATOR_STEPS = 2`, `DISCRIMINATOR_THRESHOLD = 0.15`.
+
+In `tests/tools/test_timegan.py`: 34 new tests, 103 in total.
+
+### Worked
+
+```
+uv run pytest tests/tools/test_timegan.py -q
+103 passed in 11.80s
+
+uv run ruff check src/agentic_gan/tools/timegan.py tests/tools/test_timegan.py
+All checks passed!
+
+uv run ruff check src tests
+Found 51 errors.   (unchanged baseline, all in src/agentic_gan/web.py)
+```
+
+- 2 epochs on the toy table gives 6 loss rows in phase order; the log file equals
+  `loss_history`; a loss a phase does not compute is NaN.
+- The same seed gives identical loss history and bit-identical weights in all five networks;
+  a different seed changes every network.
+- Five Adam optimisers are created and hold the right networks. With 2 steps per epoch and
+  2 epochs they step 4, 4, 8, 8 and 4 times (autoencoder, supervisor, joint generator, joint
+  embedder, discriminator). With the threshold raised, the discriminator steps 0 times.
+- A non-finite loss raises `RuntimeError` naming the phase and epoch, tested in each phase.
+- One-off check on real rows, not committed: 10 epochs per phase on the first 2,000 rows of
+  the Default train split. Every loss fell: autoencoder 3.33 to 2.49, supervised 0.070 to
+  0.0025, joint generator 32.6 to 16.2. It took 16.6 s at 15 steps per epoch.
+
+### Failed
+
+Nothing failed in this step.
+
+### Decisions
+
+- **Five optimisers, as in the reference code:** autoencoder (embedder + recovery),
+  supervisor, joint generator (generator + supervisor), joint embedder (embedder + recovery),
+  discriminator. Each keeps its own Adam state.
+- **What the loss columns hold.** `Embedder Loss` is the loss the embedder update minimised:
+  `10 * sqrt(MSE)` in the autoencoder phase, and that plus `0.1 *` supervised loss in the
+  joint phase. `Supervised Loss` is the plain next-step MSE in both phases that compute it.
+  `Discriminator Loss` is recorded at every joint step, whether or not the update ran.
+- **`sqrt` floor.** `sqrt(loss + 1e-8)` instead of `sqrt(loss)`, so the gradient stays finite
+  if a loss ever reaches exactly zero. It does not change the loss values at the precision
+  logged.
+- **Standard deviation in the moment loss** is `sqrt(batch variance + 1e-6)` with the
+  population variance, as in the reference code.
+- **In the generator update the embedder output is computed without gradient.** The embedder
+  is not updated in that step, so this changes nothing but the cost.
+- **`GENERATOR_STEPS` and `DISCRIMINATOR_THRESHOLD` are module constants**, not `DEFAULTS`
+  keys, so the Step 1 `DEFAULTS` test stands unchanged. Both are recorded in `model.params`,
+  with the resolved `noise_dim`, `num_layers`, `gamma`, `lr` and `steps_per_epoch`.
+- **`seed` must be a whole number**; anything else is a `ValueError`.
+- Added a test that 15 epochs lower the autoencoder and supervised losses, as a guard against
+  a sign or wiring error.
+
+### Open questions
+
+- **Wall time, rough only.** The full train split has 140 steps per epoch against 15 in the
+  2,000-row check. If time scales with steps, 10 epochs per phase is about 2.6 minutes, 100
+  about 26 minutes and 300 about 78 minutes. Step 4 measures this on the full split.
+- **The autoencoder loss flattened at about 2.47 after 75 steps in the 2,000-row check**, then
+  fell again to 1.18 in the joint phase. Whether it breaks through with more steps is
+  something the full run's loss curve will show.
