@@ -51,6 +51,12 @@ def _selected_rows(metrics: pd.DataFrame) -> pd.DataFrame:
     missing = [name for name in _COLUMNS if name not in metrics]
     if missing:
         raise ValueError(f"metrics table is missing columns: {missing}")
+    if "synthetic_weight" in metrics:
+        weights = metrics["synthetic_weight"].fillna(1.0)
+        if weights.groupby(metrics["dataset"]).nunique().gt(1).any():
+            raise ValueError(
+                "filter metrics to one synthetic_weight per dataset before comparisons"
+            )
     return metrics[
         metrics["status"].astype(str).str.upper().eq("SUCCESS")
         & metrics["selected"].astype(str).str.lower().eq("true")

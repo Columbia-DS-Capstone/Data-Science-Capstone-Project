@@ -819,3 +819,210 @@ def test_live_vertex_plan_stays_within_the_allowed_values(planning):
     assert set(plan.gan_levels) <= {0.5}  # 0.25 failed the quality gate
     assert set(plan.seeds) <= {42, 43}
     assert _llm_decisions(run).iloc[0].outcome != "LLM_FALLBACK"
+
+
+@pytest.mark.parametrize("weight", [0.0, -0.1, 1.1, float("nan"), float("inf")])
+def test_synthetic_weight_config_rejects_invalid_values(experiment, weight):
+    request, *_ = experiment
+    with pytest.raises(ValueError):
+        request.config.updated(synthetic_weight=weight)
+
+
+def test_synthetic_weight_preserves_default_and_changes_augmented_predictions(experiment, tmp_path):
+    request, _, _, clean, extras = experiment
+    config = DATASETS["default"]
+    extra = pd.read_csv(extras[0].path).drop(columns="is_synthetic")
+    protocol = {"protocol_id": "toy", "thresholds": {"Logistic": 0.27}}
+    X, y = training._model_data(clean["train"], config, synthetic=extra)
+    reference = b._with_preprocessing(
+        LogisticRegression(random_state=42), training.ArmEncoder(config)
+    )
+    reference.fit(X, y)  # the pre-weighting fit call
+    val, _ = training._model_data(clean["validation"], config)
+    expected = reference.predict_proba(val)[:, 1]
+    records = []
+    probabilities = []
+    for weight in (1.0, 0.25):
+        record = training._fit_record(
+            Arm.GAN,
+            0.25,
+            clean,
+            extra,
+            None,
+            "Logistic",
+            LogisticRegression(random_state=42),
+            42,
+            config,
+            protocol,
+            tmp_path,
+            synthetic_weight=weight,
+        )
+        assert record.status is Status.SUCCESS, record.reason
+        records.append(record)
+        probabilities.append(pd.read_csv(record.val_predictions_path).probability.to_numpy())
+    # Compare the fitted estimator too, avoiding CSV round-trip tolerance.
+    default = training._fit_record(
+        Arm.GAN,
+        0.25,
+        clean,
+        extra,
+        None,
+        "Logistic",
+        LogisticRegression(random_state=42),
+        42,
+        config,
+        protocol,
+        tmp_path,
+    )
+    actual = joblib.load(default.model_path)["estimator"].predict_proba(val)[:, 1]
+    np.testing.assert_array_equal(expected, actual)
+    assert not np.allclose(probabilities[0], probabilities[1])
+    assert all(record.weight_applied for record in records)
+    path, _ = training._save_metrics(records, "default", tmp_path)
+    metrics = pd.read_csv(path)
+    assert set(metrics.synthetic_weight) == {1.0, 0.25}
+    assert metrics.weight_applied.all()
+
+
+@pytest.mark.parametrize("arm", [Arm.RAW, Arm.BASELINE])
+def test_real_only_arms_ignore_synthetic_weight(experiment, tmp_path, arm):
+    _, _, raw, clean, _ = experiment
+    probabilities = []
+    for weight in (1.0, 0.25):
+        record = training._fit_record(
+            arm,
+            None,
+            raw if arm is Arm.RAW else clean,
+            None,
+            None,
+            "Logistic",
+            LogisticRegression(random_state=42),
+            42,
+            DATASETS["default"],
+            {"protocol_id": "toy", "thresholds": {"Logistic": 0.27}},
+            tmp_path,
+            synthetic_weight=weight,
+        )
+        assert record.status is Status.SUCCESS, record.reason
+        probabilities.append(pd.read_csv(record.val_predictions_path).probability.to_numpy())
+    np.testing.assert_array_equal(*probabilities)
+
+
+class WeightSpy(LogisticRegression):
+    fits = []
+
+    def fit(self, X, y, sample_weight=None):
+        type(self).fits.append((self.C, None if sample_weight is None else np.array(sample_weight)))
+        return super().fit(X, y, sample_weight=sample_weight)
+
+
+def test_stacking_weights_reach_bases_inner_folds_and_final_estimator(experiment):
+    from sklearn.ensemble import StackingClassifier
+
+    _, _, _, clean, extras = experiment
+    extra = pd.read_csv(extras[0].path).drop(columns="is_synthetic")
+    X, y = training._model_data(clean["train"], DATASETS["default"], synthetic=extra)
+    weights = np.where(X.is_synthetic.eq(1), 0.25, 1.0)
+    WeightSpy.fits = []
+    stack = StackingClassifier(
+        estimators=[("one", WeightSpy(C=1)), ("two", WeightSpy(C=2))],
+        final_estimator=WeightSpy(C=3),
+        cv=2,
+    )
+    model = b._with_preprocessing(stack, training.ArmEncoder(DATASETS["default"]))
+    params, applied = b.sample_weight_fit_params(model, weights)
+    assert applied
+    model.fit(X, y, **params)
+    assert len(WeightSpy.fits) == 7  # 2 full bases + 4 inner-fold bases + final estimator
+    for identifier in (1, 2):
+        calls = [w for c, w in WeightSpy.fits if c == identifier]
+        assert len(calls) == 3
+        np.testing.assert_array_equal(calls[0], weights)
+        assert sum(len(w) for w in calls[1:]) == len(weights)
+        assert sum((w == 0.25).sum() for w in calls[1:]) == (weights == 0.25).sum()
+    np.testing.assert_array_equal([w for c, w in WeightSpy.fits if c == 3][0], weights)
+
+
+def test_unsupported_weight_is_reported_in_metrics_and_warnings(experiment, tmp_path):
+    from sklearn.neighbors import KNeighborsClassifier
+
+    _, _, _, clean, extras = experiment
+    extra = pd.read_csv(extras[0].path).drop(columns="is_synthetic")
+    record = training._fit_record(
+        Arm.GAN,
+        0.25,
+        clean,
+        extra,
+        None,
+        "KNN",
+        KNeighborsClassifier(),
+        42,
+        DATASETS["default"],
+        {"protocol_id": "toy", "thresholds": {"KNN": 0.27}},
+        tmp_path,
+        synthetic_weight=0.25,
+    )
+    assert record.status is Status.SUCCESS, record.reason
+    assert not record.weight_applied
+    assert any("KNeighborsClassifier" in warning for warning in record.warnings)
+    path, _ = training._save_metrics([record], "default", tmp_path)
+    assert not pd.read_csv(path).weight_applied.any()
+
+
+def test_weighted_training_protocol_and_cv_are_audited(experiment):
+    request, run, *_ = experiment
+    base = json.loads(request.config.training_protocol_path.read_text())
+    result = training.run_training(
+        request.updated(config=request.config.updated(synthetic_weight=0.25, training_cv_folds=2)),
+        run,
+    )
+    assert result.status is Status.SUCCESS, result.reason
+    protocol = json.loads(result.protocol_path.read_text())
+    assert protocol["synthetic_weight"] == 0.25
+    assert protocol["thresholds"] == base["thresholds"]
+    assert protocol["protocol_id"] != base["protocol_id"]
+    metrics = pd.read_csv(result.metrics_path)
+    assert metrics.synthetic_weight.eq(0.25).all()
+    assert metrics.weight_applied.all()
+    cv = pd.read_csv(result.cv_metrics_path)
+    assert cv.synthetic_weight.eq(0.25).all()
+    assert cv[cv.status.eq("SUCCESS")].weight_applied.all()
+    assert b.protocol_with_synthetic_weight(base, 1.0) == base
+
+
+def test_stacking_with_unsupported_base_reports_its_name():
+    from sklearn.ensemble import StackingClassifier
+    from sklearn.neighbors import KNeighborsClassifier
+
+    model = StackingClassifier(
+        estimators=[("neighbors", KNeighborsClassifier()), ("logistic", LogisticRegression())], cv=2
+    )
+    with pytest.warns(UserWarning, match="model/neighbors.*KNeighborsClassifier"):
+        params, applied = b.sample_weight_fit_params(model, np.array([1.0, 0.25]))
+    assert not applied and params == {}
+
+
+def test_run_models_routes_weights_through_outer_cv(monkeypatch):
+    rng = np.random.default_rng(52)
+    X = rng.normal(size=(72, 3))
+    y = np.tile([0, 0, 1], 24)
+    weights = np.where(np.arange(48) % 4 == 0, 0.25, 1.0)
+    WeightSpy.fits = []
+    monkeypatch.setattr(b, "build_models", lambda seed=42: {"Spy": WeightSpy()})
+    result = b.run_models(
+        X[:48],
+        y[:48],
+        X[48:60],
+        y[48:60],
+        X[60:],
+        y[60:],
+        cv_folds=2,
+        thresholds={"Spy": 0.27},
+        sample_weight=weights,
+        synthetic_weight=0.25,
+    )
+    assert result.weight_applied.all()
+    assert len(WeightSpy.fits) == 3
+    np.testing.assert_array_equal(WeightSpy.fits[-1][1], weights)
+    assert sum(len(w) for _, w in WeightSpy.fits[:2]) == len(weights)
+    assert sum((w == 0.25).sum() for _, w in WeightSpy.fits[:2]) == (weights == 0.25).sum()

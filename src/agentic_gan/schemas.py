@@ -136,6 +136,7 @@ class RunConfig(Schema):
     # 10% was the best of 10, 25 and 50% for 7 of 8 dataset and arm pairs, and the loss against
     # the cleaned baseline grew with every step up. List several levels to sweep them.
     fill_levels: list[FillLevel] = Field(default_factory=lambda: [0.10], min_length=1)
+    synthetic_weight: float = Field(1.0, gt=0, le=1.0)
     quality_gate: QualityThresholds = Field(default_factory=QualityThresholds)
     sanity_rules: list[str] = Field(default_factory=list)
     max_attempts: int = Field(3, ge=1)
@@ -441,6 +442,8 @@ class ModelRecord(Outcome):
     validation_probability_range: float | None = Field(None, ge=0, le=1)
     training_rows: int | None = Field(None, ge=1)
     synthetic_rows: int = Field(0, ge=0)
+    synthetic_weight: float = Field(1.0, gt=0, le=1.0)
+    weight_applied: bool = False
     val_metrics: dict[str, float] = Field(default_factory=dict)
     test_metrics: dict[str, float] = Field(default_factory=dict)
 

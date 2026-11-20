@@ -7,11 +7,15 @@ Noor's cleaned splits in ``data/interim/<dataset>/`` and, optionally, CTGAN file
     uv run python -m agentic_gan.tools.training_grid --dataset bank_marketing --seeds 42 \
         --ctgan-prefix data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill
 
-Without ``--ctgan-prefix`` the CTGAN arm is not run (original, cleaned and SMOTENC only).
+The prefix names files as percent levels (``fill2.5.csv`` means 2.5%). One file at
+or above the largest requested fill is enough: all cells use nested prefixes of that pool.
+Alternatively pass ``--ctgan-pool path/to/pool.csv`` explicitly.
+
+Without ``--ctgan-prefix`` or ``--ctgan-pool`` the CTGAN arm is not run
+(original, cleaned and SMOTENC only).
 """
 
 import argparse
-import shutil
 import time
 from pathlib import Path
 
@@ -43,10 +47,13 @@ def build_request(
     fill_levels: tuple[float, ...] = FILL_LEVELS,
     ctgan_prefix: str | None = None,
     runs_dir: Path = ROOT / "runs",
+    *,
+    ctgan_pool: Path | None = None,
+    synthetic_weight: float = 1.0,
 ) -> tuple[TrainingRequest, RunDir]:
     """Create the run folder and the request for one dataset.
 
-    ``ctgan_prefix`` + the fill level as a whole percent + ``.csv`` names each CTGAN file.
+    CTGAN levels are nested prefixes of one pool large enough for the largest fill.
     """
     config = DATASETS[dataset]
     source = ROOT / config.file  # IEEE-CIS: the local file, joined to the identity table below
@@ -57,6 +64,7 @@ def build_request(
         positive_class="yes" if dataset == "bank_marketing" else 1,
         seeds=seeds,
         fill_levels=list(fill_levels),
+        synthetic_weight=synthetic_weight,
     )
     run = create_run(cfg, runs_dir=runs_dir)
 
@@ -89,14 +97,32 @@ def build_request(
         arms[arm] = ArmFiles(**paths)
 
     accepted = []
-    if ctgan_prefix:
+    if ctgan_prefix or ctgan_pool:
         train = pd.read_csv(ROOT / "data" / "interim" / dataset / "train_cleaned.csv")
         positives = int(train[config.target].sum())
+        if ctgan_prefix and ctgan_pool:
+            raise ValueError("give ctgan_prefix or ctgan_pool, not both")
+        if ctgan_pool is None:
+            prefix = ROOT / ctgan_prefix
+            candidates = []
+            for path in prefix.parent.glob(f"{prefix.name}*.csv"):
+                try:
+                    percent = float(path.stem[len(prefix.name) :])
+                except ValueError:
+                    continue
+                if percent >= max(fill_levels) * 100:
+                    candidates.append((percent, path))
+            if not candidates:
+                raise ValueError("no CTGAN pool file at or above the largest requested fill")
+            ctgan_pool = min(candidates)[1]
+        pool = pd.read_csv(ROOT / ctgan_pool)
+        maximum = fill_rows(max(fill_levels), positives, len(train) - positives)
+        if len(pool) < maximum:
+            raise ValueError(f"CTGAN pool has {len(pool)} rows; need {maximum}")
         for level in fill_levels:
-            file = ROOT / f"{ctgan_prefix}{round(level * 100)}.csv"
-            copy = run.subdir("synthetic") / file.name
-            shutil.copy(file, copy)
             rows = fill_rows(level, positives, len(train) - positives)
+            copy = run.subdir("synthetic") / f"ctgan_fill{level * 100:g}.csv"
+            pool.head(rows).to_csv(copy, index=False)
             accepted.append(SyntheticSet(fill_level=level, rows=rows, path=copy))
     return TrainingRequest(config=cfg, **arms, accepted_synthetic=accepted), run
 
@@ -121,11 +147,15 @@ def save_results(
     """Replace this dataset's rows in the results table and its line in the run-time table."""
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics = pd.read_csv(result.metrics_path)
+    if "synthetic_weight" not in metrics:
+        metrics["synthetic_weight"] = 1.0
+    weight = float(metrics["synthetic_weight"].iloc[0])
     paths = (out_dir / "training_all_arms.csv", out_dir / "training_run_times.csv")
     times = pd.DataFrame(
         [
             {
                 "dataset": dataset,
+                "synthetic_weight": weight,
                 "seeds": len(seeds),
                 "model_fits": len(result.records),
                 "seconds": round(seconds, 1),
@@ -135,7 +165,11 @@ def save_results(
     for path, new in zip(paths, (metrics, times), strict=True):
         if path.exists():
             old = pd.read_csv(path)
-            new = pd.concat([old[old["dataset"] != dataset], new], ignore_index=True)
+            if "synthetic_weight" not in old:
+                old["synthetic_weight"] = 1.0
+            old["synthetic_weight"] = old["synthetic_weight"].fillna(1.0)
+            keep = old["dataset"].ne(dataset) | old["synthetic_weight"].ne(weight)
+            new = pd.concat([old[keep], new], ignore_index=True)
         new.to_csv(path, index=False)
 
 
@@ -144,14 +178,23 @@ def main() -> None:
     parser.add_argument("--dataset", default="bank_marketing", choices=sorted(DATASETS))
     parser.add_argument("--seeds", type=int, nargs="+", default=[42])
     parser.add_argument("--fill-levels", type=float, nargs="+", default=list(FILL_LEVELS))
-    parser.add_argument("--ctgan-prefix", help="path prefix of the CTGAN files, up to the level")
+    ctgan = parser.add_mutually_exclusive_group()
+    ctgan.add_argument("--ctgan-prefix", help="CTGAN file prefix, followed by percent and .csv")
+    ctgan.add_argument("--ctgan-pool", type=Path, help="one pool covering the largest fill")
+    parser.add_argument("--synthetic-weight", type=float, default=1.0)
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runs")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--no-save", action="store_true", help="do not update results/")
     args = parser.parse_args()
 
     request, run = build_request(
-        args.dataset, args.seeds, tuple(args.fill_levels), args.ctgan_prefix, args.runs_dir
+        args.dataset,
+        args.seeds,
+        tuple(args.fill_levels),
+        args.ctgan_prefix,
+        args.runs_dir,
+        ctgan_pool=args.ctgan_pool,
+        synthetic_weight=args.synthetic_weight,
     )
     start = time.perf_counter()
     result = run_training(request, run)

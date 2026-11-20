@@ -1,0 +1,29 @@
+[
+  {
+    "synthetic_weight": 0.25,
+    "run_id": "bank_marketing_20261120-073240",
+    "successful_fits": 32,
+    "all_weights_applied": true,
+    "validation_synthetic_rows": 0,
+    "test_synthetic_rows": 0,
+    "exact_default_prediction_files_checked": 0
+  },
+  {
+    "synthetic_weight": 0.5,
+    "run_id": "bank_marketing_20261120-073304",
+    "successful_fits": 32,
+    "all_weights_applied": true,
+    "validation_synthetic_rows": 0,
+    "test_synthetic_rows": 0,
+    "exact_default_prediction_files_checked": 0
+  },
+  {
+    "synthetic_weight": 1.0,
+    "run_id": "bank_marketing_20261120-073327",
+    "successful_fits": 32,
+    "all_weights_applied": true,
+    "validation_synthetic_rows": 0,
+    "test_synthetic_rows": 0,
+    "exact_default_prediction_files_checked": 12
+  }
+]

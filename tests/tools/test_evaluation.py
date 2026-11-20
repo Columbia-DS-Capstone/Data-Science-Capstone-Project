@@ -593,3 +593,15 @@ def test_missing_numeric_segment_values_are_not_a_string_nan_group():
     table = segment_metrics(data, features, "age")
     assert table.n.sum() == n - 1
     assert "nan" not in table.segment.tolist()
+
+
+def test_comparisons_require_a_single_synthetic_weight_per_dataset():
+    mixed = pd.concat(
+        [
+            results().assign(synthetic_weight=1.0),
+            results().assign(synthetic_weight=0.25),
+        ],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="one synthetic_weight"):
+        compare_arms(mixed, reference="cleaned")
