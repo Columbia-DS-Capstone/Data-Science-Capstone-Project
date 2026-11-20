@@ -354,3 +354,57 @@ Nothing failed in this step.
   needs 1,004 positive rows, so the runner's `y == 1` filter may discard 75% to 80% of the
   rows drawn. The sampler's overshoot handles that; the cost is sampling time, which Step 5
   will show.
+
+## Entry 4 — 2026-11-20 — Step 4 smoke test, timing, draft PR
+
+### Built
+
+- `tests/tools/test_timegan.py`: `TestSmokeOnRealRows`. It reads the first 500 rows of
+  `data/interim/default/train_cleaned.csv`, drops `source_row`, trains 1 epoch per phase,
+  samples 50 rows and asserts zero `DEFAULT_RULES` violations, the training columns plus
+  `is_synthetic`, and the training dtypes. It is skipped if the file is missing.
+- No source file changed in this step.
+
+### Worked
+
+- `uv run pytest tests/tools/test_timegan.py`: 156 passed in 19.58 s, outside the sandbox.
+- Ruff: the two TimeGAN files pass; the whole tree still has the 51 baseline errors in
+  `src/agentic_gan/web.py`.
+- Timing probe, a one-off script that is not committed: 3 epochs per phase on the full
+  18,000-row train split, CPU with 8 torch threads, batch size 128, hidden size 48, seed 42,
+  140 steps per epoch.
+
+  | Phase | Seconds for 3 epochs | Seconds per epoch |
+  | --- | --- | --- |
+  | autoencoder | 4.0 | 1.34 |
+  | supervised | 2.3 | 0.77 |
+  | joint | 41.3 | 13.77 |
+  | all three | 47.6 (48.5 with setup) | 15.88 |
+
+  | Epochs per phase | Projected seconds | Projected minutes |
+  | --- | --- | --- |
+  | 50 | 794 | 13.2 |
+  | 100 | 1,588 | 26.5 |
+  | 200 | 3,176 | 52.9 |
+  | 300 | 4,764 | 79.4 |
+
+- Losses in the probe: autoencoder 2.54, 2.04, 1.39; supervised 0.0327, 0.0007, 0.0003; joint
+  generator 26.3, 11.8, 12.0; discriminator 1.58, 1.55, 1.41.
+- Sampling 1,004 unfiltered rows from the probe model took 0.04 s.
+
+### Failed
+
+- My probe script first passed the wide columns as three nested lists. `step_columns_from_wide`
+  takes one flat list and raised `ValueError`. The script was wrong, not the tool.
+
+### Decisions
+
+- **The full run uses 100 epochs per phase** (Akriti's choice, projected 26.5 minutes). It is
+  14,000 steps per phase and leaves time for a second run if the scorecard needs one.
+- The projection assumes time is linear in epochs. The joint phase is 87% of the time.
+
+### Open questions
+
+- The Step 2 estimate from 2,000 rows (26 minutes for 100 epochs) matches this measurement.
+  The real wall time of the full run is to be reported from the run itself, not from this
+  table.

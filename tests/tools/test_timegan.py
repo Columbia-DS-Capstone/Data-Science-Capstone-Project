@@ -3,6 +3,7 @@
 Step 1: the data layer (step columns, layout, scaling, decoding, validation, save and load).
 Step 2: the five networks and the three-phase training loop.
 Step 3: the sampler.
+Step 4: a smoke test on the first 500 real training rows.
 The toy table has the shape of the cleaned Default training split without ``source_row``.
 """
 
@@ -1078,3 +1079,29 @@ class TestSampleArguments:
     def test_seed_is_required(self, trained):
         with pytest.raises(TypeError, match="seed"):
             _timegan().sample_timegan(trained[0], 5)
+
+
+# ===========================================================================
+# Step 4: smoke test on real rows
+# ===========================================================================
+
+SMOKE_ROWS = 500
+
+
+class TestSmokeOnRealRows:
+    @pytest.mark.skipif(not REAL_TRAIN.exists(), reason="Default training split not present")
+    def test_one_epoch_on_real_rows_samples_rows_that_break_no_rule(self):
+        tg = _timegan()
+        real = pd.read_csv(REAL_TRAIN, nrows=SMOKE_ROWS).drop(columns="source_row")
+        assert len(real) == SMOKE_ROWS
+        assert list(real.columns) == COLUMNS
+
+        model = tg.train_timegan(real, TARGET, STATIC, _default_steps(), epochs=1)
+        assert model.n_train_rows == SMOKE_ROWS
+        assert len(model.loss_history) == len(tg.PHASES)
+
+        out = tg.sample_timegan(model, 50, seed=0)
+        assert len(out) == 50
+        assert list(out.columns) == [*real.columns, IS_SYNTHETIC]
+        assert out[COLUMNS].dtypes.to_dict() == real.dtypes.to_dict()
+        assert _violations(out) == {rule.name: 0.0 for rule in DEFAULT_RULES}
