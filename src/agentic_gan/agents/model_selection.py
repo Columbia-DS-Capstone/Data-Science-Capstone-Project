@@ -1522,6 +1522,10 @@ def _train_ctgan(
         rule_filter=knobs["rule_filter"],
         rake_columns=knobs["rake_columns"],
         rules=RULES.get(dataset, ()),
+        selection_mode=knobs["selection_mode"],
+        pool_multiplier=knobs["pool_multiplier"],
+        boundary_low=knobs["boundary_low"],
+        boundary_high=knobs["boundary_high"],
         seed=request.config.split_seed,
     )
     if IS_SYNTHETIC not in rows.columns:

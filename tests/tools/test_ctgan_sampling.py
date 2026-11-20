@@ -4,6 +4,11 @@ The stand-in draws rows from a fixed table, so the real ``sample_synthetic`` run
 rule filter, copy check) without training a network.
 """
 
+import importlib.util
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -341,3 +346,191 @@ def test_integer_codes_are_raked_by_value_and_only_continuous_columns_are_binned
     pool = source.assign(day=np.arange(len(source)) % 31)
     _, _, names = with_rake_bins(pool, real, ["SEX", "EDUCATION", "MARRIAGE", "day"])
     assert names == ["SEX", "EDUCATION", "MARRIAGE", "__bin_day"]
+
+
+# --- V3 selection modes ---------------------------------------------------------------------------
+
+MODULE = "agentic_gan.tools.ctgan_sampling"
+
+
+def selection_source():
+    """Bank-shaped rows; half have an obviously synthetic `balance` (far above the real ones)."""
+    source = bank_source(n=12_000, broken_share=0)
+    shifted = np.random.default_rng(5).random(len(source)) < 0.5
+    source.loc[shifted, "balance"] += 5000
+    return source
+
+
+def fake_boundary(monkeypatch, probability):
+    """Replace the LightGBM scorer (it must not load beside torch) with ``probability(frame)``."""
+    seen = []
+
+    def scorer(train, synthetic, *, target, positive, seed):
+        seen.append((train, synthetic))
+        return np.asarray(probability(synthetic), dtype=float)
+
+    monkeypatch.setattr(f"{MODULE}.boundary_probability", scorer)
+    return seen
+
+
+def in_band(frame):
+    """A stand-in model: the probability rises with `balance`, from 0 at 500 to 1 at 2000."""
+    return np.clip((frame["balance"].to_numpy() - 500) / 1500, 0, 1)
+
+
+def test_recipe_selection_defaults_and_validation():
+    recipe = recipe_for("bank_marketing")
+    assert recipe.selection_mode == "none"
+    assert recipe.pool_multiplier == 5
+    assert (recipe.boundary_low, recipe.boundary_high) == (0.10, 0.60)
+    with pytest.raises(ValueError, match="selection_mode"):
+        GeneratorRecipe(300, 500, 10, 1, "conditional", False, [], selection_mode="best")
+    with pytest.raises(ValueError, match="pool_multiplier"):
+        GeneratorRecipe(300, 500, 10, 1, "conditional", False, [], pool_multiplier=0)
+    with pytest.raises(ValueError, match="boundary_low"):
+        GeneratorRecipe(300, 500, 10, 1, "conditional", False, [], boundary_low=0.7)
+
+
+def test_none_returns_the_same_rows_as_v2():
+    source = bank_source()
+    args = (fitted(source), source.head(300), reference(), [200])
+    plain = draw(*args, rake_columns=["job"], seed=11)
+    explicit = draw(*args, rake_columns=["job"], seed=11, selection_mode="none")
+    pd.testing.assert_frame_equal(plain, explicit)
+
+
+@pytest.mark.parametrize("mode", ["realism", "boundary"])
+def test_each_selection_mode_returns_the_largest_fill_without_train_copies(mode, monkeypatch):
+    source = selection_source()
+    train = source.head(1500)
+    if mode == "boundary":
+        fake_boundary(monkeypatch, lambda frame: np.full(len(frame), 0.3))
+    rows = draw(
+        fitted(source),
+        train,
+        reference(),
+        [50, 100, 200],
+        rake_columns=["job"],
+        selection_mode=mode,
+        seed=3,
+    )
+    assert len(rows) == 200
+    assert (rows["y"] == 1).all()
+    real = set(map(tuple, train.itertuples(index=False)))
+    made = set(map(tuple, rows[list(source.columns)].itertuples(index=False)))
+    assert not made & real
+
+
+@pytest.mark.parametrize("mode", ["realism", "boundary"])
+def test_kept_rows_come_from_the_pool_of_pool_multiplier_times_the_largest_fill(mode, monkeypatch):
+    source = selection_source()
+    pools = []
+    import agentic_gan.tools.ctgan as ctgan_tool
+
+    original = ctgan_tool.sample_synthetic
+
+    def spy(model, n, **kwargs):
+        pool = original(model, n, **kwargs)
+        pools.append((n, pool))
+        return pool
+
+    monkeypatch.setattr(ctgan_tool, "sample_synthetic", spy)
+    if mode == "boundary":
+        fake_boundary(monkeypatch, lambda frame: np.full(len(frame), 0.3))
+    rows = draw(
+        fitted(source),
+        source.head(300),
+        reference(),
+        [100, 200],
+        selection_mode=mode,
+        pool_multiplier=4,
+        seed=3,
+    )
+    ((asked, pool),) = pools
+    assert asked == 4 * 200
+    columns = list(source.columns)
+    assert set(map(tuple, rows[columns].itertuples(index=False))) <= set(
+        map(tuple, pool[columns].itertuples(index=False))
+    )
+
+
+def test_selection_models_are_fitted_on_the_given_real_rows_only(monkeypatch):
+    source = selection_source()
+    train = source.head(1500)
+    real = reference()
+    boundary = fake_boundary(monkeypatch, lambda frame: np.full(len(frame), 0.3))
+    realism = []
+    original = __import__(MODULE, fromlist=["x"]).synthetic_probability
+
+    def spy(real_rows, synthetic, *, target, seed):
+        realism.append(real_rows)
+        return original(real_rows, synthetic, target=target, seed=seed)
+
+    monkeypatch.setattr(f"{MODULE}.synthetic_probability", spy)
+    draw(fitted(source), train, real, [100], selection_mode="boundary", seed=3)
+    draw(fitted(source), train, real, [100], selection_mode="realism", seed=3)
+    assert boundary[0][0] is train  # the boundary model sees the real training table
+    assert realism[0] is real  # the realism model sees the real minority rows
+
+
+def test_realism_keeps_the_more_real_looking_rows():
+    source = selection_source()
+    plain = draw(fitted(source), source.head(300), reference(), [400], pool_rows=2000, seed=3)
+    kept = draw(
+        fitted(source),
+        source.head(300),
+        reference(),
+        [400],
+        selection_mode="realism",
+        pool_multiplier=5,
+        seed=3,
+    )
+    assert (plain["balance"] > 3000).mean() > 0.3  # about half the pool is obviously synthetic
+    assert (kept["balance"] > 3000).mean() < 0.1
+
+
+def test_boundary_keeps_only_rows_inside_the_bounds(monkeypatch):
+    source = selection_source()
+    fake_boundary(monkeypatch, in_band)
+    rows = draw(
+        fitted(source),
+        source.head(300),
+        reference(),
+        [100],
+        selection_mode="boundary",
+        boundary_low=0.10,
+        boundary_high=0.60,
+        seed=3,
+    )
+    probability = in_band(rows)
+    assert ((probability >= 0.10) & (probability <= 0.60)).all()
+
+
+def test_boundary_with_too_few_rows_in_the_band_raises(monkeypatch):
+    source = selection_source()
+    fake_boundary(monkeypatch, lambda frame: np.full(len(frame), 0.95))
+    with pytest.raises(ValueError, match="predicted probability"):
+        draw(fitted(source), source.head(300), reference(), [100], selection_mode="boundary")
+
+
+@pytest.mark.skipif(importlib.util.find_spec("lightgbm") is None, reason="needs lightgbm")
+def test_the_real_boundary_scorer_ranks_rows_by_the_response():
+    # Run in its own process: LightGBM and torch (loaded by this file) crash together on macOS.
+    script = textwrap.dedent(
+        """
+        import numpy as np, pandas as pd
+        from agentic_gan.tools.ctgan_sampling import boundary_probability
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=3000)
+        train = pd.DataFrame({"x": x, "c": rng.choice(["a", "b"], 3000),
+                              "y": (x + rng.normal(scale=0.5, size=3000) > 0.5).astype(int)})
+        synth = pd.DataFrame({"x": np.r_[np.full(50, -2.0), np.full(50, 2.0)],
+                              "c": ["a"] * 100, "is_synthetic": 1, "y": 1})
+        p = boundary_probability(train, synth, target="y", positive=1, seed=0)
+        assert p.shape == (100,) and ((p >= 0) & (p <= 1)).all()
+        assert p[50:].mean() > p[:50].mean() + 0.5, (p[:50].mean(), p[50:].mean())
+        print("ok")
+        """
+    )
+    done = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == "ok", done.stderr[-800:]
