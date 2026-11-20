@@ -502,3 +502,80 @@ Nothing stopped the run. These are quality findings, not failures of the code:
   mismatches above suggest the scorecard will fail on SEX, MARRIAGE and the amount columns.
 - **Whether these fill rows help or hurt PR-AUC** is for Step 7. Rows that are 98.6% one sex
   and have narrow amounts may add little signal.
+
+## Entry 6 — 2026-11-20 — Step 6 fidelity scorecard
+
+### Built
+
+No code changed. Two artifacts from one command:
+
+- `eda/timegan_default/artifacts/scorecard.txt`
+- `eda/timegan_default/artifacts/quality_fidelity.json`
+
+Command: `uv run python -m agentic_gan.tools.quality_fidelity --dataset default
+data/interim/default/synthetic/default_timegan_fill10.csv
+data/interim/default/synthetic/default_ctgan_v2_fill10.csv --per-column --json
+eda/timegan_default/artifacts/quality_fidelity.json | tee
+eda/timegan_default/artifacts/scorecard.txt`. Exit status 1: a hard check failed, which the
+step allows. The tool read the train split and, for its real-vs-real baseline, the
+validation split. Nothing read the test split.
+
+### Worked
+
+- The reference is the 3,982 real positive training rows. Limits are 2x the real-vs-real
+  values, with floors.
+- **Verdict: TimeGAN FAIL, CTGAN v2 FAIL.** Real-vs-real passes.
+- Hard checks (gap = value minus limit; a negative gap passes):
+
+  | Hard check | Limit | Real-vs-real | TimeGAN value | TimeGAN gap | CTGAN v2 value | CTGAN v2 gap |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | mean_column_distance | 0.065 | 0.030 | 0.355 FAIL | +0.290 | 0.087 FAIL | +0.022 |
+  | worst_column_distance | 0.085 | 0.042 | 0.739 FAIL | +0.654 | 0.251 FAIL | +0.166 |
+  | spearman_diff | 0.055 | 0.025 | 0.347 FAIL | +0.292 | 0.054 pass | -0.001 |
+  | cramers_v_diff | 0.050 | 0.025 | 0.311 FAIL | +0.261 | 0.042 pass | -0.008 |
+  | rule:pay_status_codes | 0.005 | 0.000 | 0.000 pass | -0.005 | 0.000 pass | -0.005 |
+  | rule:pay_amount_non_negative | 0.005 | 0.000 | 0.000 pass | -0.005 | 0.000 pass | -0.005 |
+  | rule:static_codes | 0.005 | 0.000 | 0.000 pass | -0.005 | 0.000 pass | -0.005 |
+  | label_balance | 0.010 | 0.000 | 0.000 pass | -0.010 | 0.000 pass | -0.010 |
+  | schema_match | 0.000 | 0.000 | 0.000 pass | 0.000 | 0.000 pass | 0.000 |
+
+- TimeGAN fails 4 hard checks, by 5.5x, 8.7x, 6.3x and 6.2x the limit. CTGAN v2 fails 2, by
+  1.3x and 3.0x.
+- Columns above the 0.085 column limit: TimeGAN 22 of 23 (only EDUCATION is under), CTGAN v2
+  9 of 23 (LIMIT_BAL, BILL_AMT4, BILL_AMT5 and the six PAY_AMT columns).
+- Five worst columns of each file:
+
+  | Rank | TimeGAN column | Distance | CTGAN v2 on that column | CTGAN v2 column | Distance | TimeGAN on that column |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 1 | PAY_5 | 0.739 | 0.030 | PAY_AMT6 | 0.251 | 0.352 |
+  | 2 | BILL_AMT6 | 0.559 | 0.084 | PAY_AMT2 | 0.208 | 0.299 |
+  | 3 | PAY_3 | 0.465 | 0.014 | PAY_AMT5 | 0.200 | 0.397 |
+  | 4 | SEX | 0.426 | 0.026 | PAY_AMT3 | 0.176 | 0.342 |
+  | 5 | PAY_6 | 0.422 | 0.023 | PAY_AMT1 | 0.160 | 0.308 |
+
+  TimeGAN is further from the real rows than CTGAN v2 on every one of the 23 columns.
+
+### Failed
+
+- The TimeGAN fill file fails the fidelity gate by a wide margin. The issue allows this
+  ("need not pass the gate"). Nothing was retrained or tuned.
+
+### Decisions
+
+- No retraining, no tuning and no change to the filter, as the step says. The fill file and
+  the model are the ones from Step 5.
+
+### Open questions
+
+- **One cause of the PAY distances is in the decoding, not only in training.** Repayment
+  code 1 is common in `PAY_1` (12.5% of train rows) and nearly absent in the other months:
+  20, 2, 1, 0 and 0 rows of 18,000 for `PAY_2` to `PAY_6`. The layout pools the valid codes
+  of a step feature over all six months, so 1 is a valid snap target everywhere. A generated
+  value between 0 and 2 then snaps to 1. In the fill file `PAY_5` is 1 in 52.5% of rows and
+  never 1 in the real rows; `PAY_2` 24.4%, `PAY_3` 14.9%, `PAY_4` 27.5%, `PAY_6` 10.9%. The
+  rule `pay_status_codes` still passes, because 1 is in `DEFAULT_PAY_CODES`. Learning the
+  valid codes per step instead of per feature would remove this without retraining. It is a
+  change to the fixed design ("snapped to nearest valid value") only in what "valid" means,
+  so it needs a decision before anyone makes it. Not done here.
+- The other failures (SEX 98.6% one value, narrow bill and payment amounts, correlation
+  differences of 0.35) come from the generator and would need a training change.
