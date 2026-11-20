@@ -19,8 +19,9 @@ from agentic_gan.tools.ctgan_sampling import (
     recipe_for,
     rule_row_filter,
     sample_for_fill,
+    with_rake_bins,
 )
-from agentic_gan.tools.quality_fidelity import BANK_RULES
+from agentic_gan.tools.quality_fidelity import BANK_RULES, DEFAULT_RULES
 
 JOBS = ["admin", "technician", "retired"]
 
@@ -117,7 +118,19 @@ def test_recipe_for_bank_is_the_v2_recipe():
     )
 
 
-@pytest.mark.parametrize("dataset", ["default", "polish", "ieee_cis", "anything_else"])
+def test_recipe_for_default_is_the_v2_recipe():
+    assert recipe_for("default") == GeneratorRecipe(
+        epochs=300,
+        batch_size=500,
+        pac=5,
+        discriminator_steps=3,
+        sampling_mode="unconditional",
+        rule_filter=True,
+        rake_columns=["SEX", "EDUCATION", "MARRIAGE", "PAY_1"],
+    )
+
+
+@pytest.mark.parametrize("dataset", ["polish", "ieee_cis", "anything_else"])
 def test_recipe_for_other_datasets_is_v1(dataset):
     assert recipe_for(dataset) == GeneratorRecipe(
         epochs=300,
@@ -260,6 +273,79 @@ def test_an_unknown_sampling_mode_raises():
     source = bank_source()
     with pytest.raises(ValueError, match="sampling_mode"):
         draw(fitted(source), source.head(300), reference(), [100], sampling_mode="sideways")
+
+
+# --- Default-shaped toy table: integer codes, positive class 1 ------------------------------------
+
+
+def default_source(n=6000, seed=3, education_probs=(0.5, 0.3, 0.2), broken_share=0.2):
+    """Default-shaped rows. ``broken_share`` of them have a negative payment amount."""
+    rng = np.random.default_rng(seed)
+    frame = {
+        "LIMIT_BAL": rng.integers(10_000, 500_000, n),
+        "SEX": rng.choice([1, 2], n, p=[0.4, 0.6]),
+        "EDUCATION": rng.choice([1, 2, 3], n, p=education_probs),
+        "MARRIAGE": rng.choice([1, 2, 3], n),
+    }
+    for month in range(1, 7):
+        frame[f"PAY_{month}"] = rng.choice([-1, 0, 1, 2], n)
+    for month in range(1, 7):
+        frame[f"PAY_AMT{month}"] = rng.integers(0, 20_000, n)
+    frame["y"] = rng.integers(0, 2, n)
+    table = pd.DataFrame(frame)
+    table.loc[rng.random(n) < broken_share, "PAY_AMT3"] = -100
+    return table
+
+
+def default_reference(education_probs=(0.3, 0.3, 0.4), n=2000, seed=9):
+    """Real defaulters whose education shares differ from the generator's."""
+    table = default_source(n, seed=seed, education_probs=education_probs, broken_share=0)
+    table["y"] = 1
+    return table
+
+
+def draw_default(source, real, counts, **overrides):
+    options = {
+        "sampling_mode": "unconditional",
+        "rule_filter": True,
+        "rake_columns": [],
+        "rules": DEFAULT_RULES,
+        "pool_rows": 12_000,
+        "seed": 42,
+    }
+    options.update(overrides)
+    return sample_for_fill(fitted(source), source.head(300), real, counts, **options)
+
+
+def test_default_rule_filter_removes_rows_with_a_negative_payment_amount():
+    source = default_source(n=10_000)
+    real = default_reference()
+    off = draw_default(source, real, [1000], rule_filter=False)
+    on = draw_default(source, real, [1000], rule_filter=True)
+    assert (off[[f"PAY_AMT{m}" for m in range(1, 7)]] < 0).any(axis=1).any()
+    assert not (on[[f"PAY_AMT{m}" for m in range(1, 7)]] < 0).any(axis=1).any()
+    assert rule_row_filter(DEFAULT_RULES)(on).all()
+
+
+def test_default_raking_brings_education_shares_to_the_reference():
+    # The generator over-produces education 1 and under-produces education 3. A 4,000-row draw
+    # keeps the sampling noise (about 1 point) small enough to check the 2-point line.
+    source = default_source(n=70_000, broken_share=0, education_probs=(0.4, 0.3, 0.3))
+    real = default_reference(education_probs=(0.3, 0.3, 0.4))
+    plain = draw_default(source, real, [4000], pool_rows=25_000)
+    raked = draw_default(source, real, [4000], pool_rows=25_000, rake_columns=["EDUCATION"])
+    want = shares(real, "EDUCATION")
+    assert (shares(plain, "EDUCATION") - want).abs().max() > 0.05
+    assert (shares(raked, "EDUCATION") - want).abs().max() < 0.02
+
+
+def test_integer_codes_are_raked_by_value_and_only_continuous_columns_are_binned():
+    source = default_source(n=3000)
+    real = default_reference()
+    real["day"] = np.arange(len(real)) % 31  # 31 distinct values: continuous
+    pool = source.assign(day=np.arange(len(source)) % 31)
+    _, _, names = with_rake_bins(pool, real, ["SEX", "EDUCATION", "MARRIAGE", "day"])
+    assert names == ["SEX", "EDUCATION", "MARRIAGE", "__bin_day"]
 
 
 # --- V3 selection modes ---------------------------------------------------------------------------

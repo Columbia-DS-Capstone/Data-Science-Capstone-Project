@@ -36,6 +36,9 @@ SAMPLING_MODES = ("conditional", "unconditional")
 POOL_ROWS = 60_000
 CONDITIONAL_POOL_FACTOR = 3  # conditional pool = this many times the largest fill
 RAKE_BINS = 5  # a numeric rake column is cut into this many quantile bins of the real rows
+# A numeric column with at most this many distinct real values is a code (SEX, EDUCATION, PAY_1),
+# so it is raked by value; only a column with more values (day_of_month) is binned.
+CODED_MAX_VALUES = 12
 RAKE_ITERATIONS = 50
 UNCONDITIONAL_MAX_ROUNDS = 100  # the target is matched by rejection, so many rounds are normal
 SELECTION_MODES = ("none", "realism", "boundary")
@@ -86,7 +89,7 @@ def _check_selection(mode: str, multiplier: int, low: float, high: float) -> Non
 
 
 def recipe_for(dataset: str) -> GeneratorRecipe:
-    """The first attempt's options: the V2 recipe for Bank Marketing, V1 for every other dataset."""
+    """The first attempt's options: the V2 recipe for Bank and Default, V1 for the rest."""
     if dataset == "bank_marketing":
         return GeneratorRecipe(
             epochs=300,
@@ -96,6 +99,16 @@ def recipe_for(dataset: str) -> GeneratorRecipe:
             sampling_mode="unconditional",
             rule_filter=True,
             rake_columns=["job", "month", "poutcome", "marital", "day_of_month"],
+        )
+    if dataset == "default":
+        return GeneratorRecipe(
+            epochs=300,
+            batch_size=500,
+            pac=5,
+            discriminator_steps=3,
+            sampling_mode="unconditional",
+            rule_filter=True,
+            rake_columns=["SEX", "EDUCATION", "MARRIAGE", "PAY_1"],
         )
     return GeneratorRecipe(
         epochs=300,
@@ -141,17 +154,19 @@ def rake_weights(
 def with_rake_bins(
     pool: pd.DataFrame, real: pd.DataFrame, columns: Sequence[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    """Copies of both tables where each numeric rake column is replaced by a bin label.
+    """Copies of both tables where each continuous rake column is replaced by a bin label.
 
     The bins are quantile bins of the real rows, so each holds about the same share of them.
-    Returns the pool, the real rows and the column names to rake on.
+    A text column, or a numeric one with at most ``CODED_MAX_VALUES`` distinct real values (an
+    integer code such as SEX or PAY_1), is raked by its own values instead. Returns the pool,
+    the real rows and the column names to rake on.
     """
     pool, real = pool.copy(), real.copy()
     names = []
     for col in columns:
         if col not in pool.columns or col not in real.columns:
             raise ValueError(f"rake column {col!r} is not in the generated and real rows")
-        if not pd.api.types.is_numeric_dtype(real[col]):
+        if not pd.api.types.is_numeric_dtype(real[col]) or real[col].nunique() <= CODED_MAX_VALUES:
             names.append(col)
             continue
         edges = np.unique(np.quantile(real[col].dropna(), np.linspace(0, 1, RAKE_BINS + 1)))
