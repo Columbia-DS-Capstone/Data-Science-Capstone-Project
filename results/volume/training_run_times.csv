@@ -1,3 +1,3 @@
-dataset,seeds,model_fits,seconds
-bank_marketing,1,48,29.8
-default,1,48,24.0
+dataset,seeds,model_fits,seconds,synthetic_weight
+bank_marketing,1,48,29.8,1.0
+default,1,48,46.6,1.0

@@ -43,6 +43,6 @@ Some CTGAN cells exceed cleaned on test alone, but none meets the #138 gain crit
 
 Reproduce with the three-weight `training_grid` loop in `docs/training.md`. Use separate results directories per weight. The experiment is an offline comparison with existing CTGAN pools, not a new quality-gate acceptance run.
 
-Default remains separate: the committed Default V2 pool predates the merged #136 recipe; a current-recipe repeat needs its new pool/run artifacts or fresh generation. No Default result is claimed here.
+The separate Default volume repeat is now complete using the current V2 pipeline files from PR #149; see `results/volume/default_v2pipe/README.md`. These weighting results remain Bank-only.
 
 No issue comments or shared-deck changes were published.

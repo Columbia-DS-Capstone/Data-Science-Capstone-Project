@@ -329,8 +329,11 @@ uv run python -m agentic_gan.tools.volume --dataset bank_marketing --run runs/<i
 ```
 
 `--ctgan-pool <file>` is an alternative to `--ctgan-prefix`. A short pool is rejected.
-For Default, use `--dataset default` and the `default_ctgan_v2_fill` prefix after
-#136's recipe is available. These are offline training comparisons; they do not
+For Default, use `--dataset default` and
+`--ctgan-pool data/interim/default/synthetic/default_ctgan_v2pipe_fill25.csv`
+from PR #149. The file named `fill2.csv` denotes 2.5%; using the largest pool
+avoids that filename rounding. The completed Default repeat and its decisions
+are in `results/volume/default_v2pipe/`. These are offline training comparisons; they do not
 claim that synthetic rows passed the pipeline quality gate.
 
 `pick_fill` uses only aligned validation predictions of each cell's selected model,
