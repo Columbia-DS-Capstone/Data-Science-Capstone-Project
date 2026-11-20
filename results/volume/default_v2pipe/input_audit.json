@@ -1,0 +1,45 @@
+{
+  "source_commit": "e49137394886c8ea6ab6e383100c625f2516b629",
+  "recipe_pr": 143,
+  "pool_pr": 149,
+  "seed": 42,
+  "training_positives": 3982,
+  "training_negatives": 14018,
+  "files": [
+    {
+      "fill_level": 0.01,
+      "path": "data/interim/default/synthetic/default_ctgan_v2pipe_fill1.csv",
+      "rows": 100,
+      "sha256": "348a3f021f51c836221a10547ba5dc2229dce5d041595842d33490ed3418ff51",
+      "nested_prefix": true
+    },
+    {
+      "fill_level": 0.025,
+      "path": "data/interim/default/synthetic/default_ctgan_v2pipe_fill2.csv",
+      "rows": 251,
+      "sha256": "ffee4d90615de017be3e9efe752ad4f5751e47cd294ea24327d073f7dd4e94be",
+      "nested_prefix": true
+    },
+    {
+      "fill_level": 0.05,
+      "path": "data/interim/default/synthetic/default_ctgan_v2pipe_fill5.csv",
+      "rows": 502,
+      "sha256": "1b123e4649cd714a42a31db0deaae360ed64b362cc43e97bdfa1a87fe8bc8397",
+      "nested_prefix": true
+    },
+    {
+      "fill_level": 0.1,
+      "path": "data/interim/default/synthetic/default_ctgan_v2pipe_fill10.csv",
+      "rows": 1004,
+      "sha256": "11f04e113c90b39f0c57de8e1a2a3353c35ff9aa4281c776b7507333deea5f3c",
+      "nested_prefix": true
+    },
+    {
+      "fill_level": 0.25,
+      "path": "data/interim/default/synthetic/default_ctgan_v2pipe_fill25.csv",
+      "rows": 2509,
+      "sha256": "a55dbdd4ba5d2fe5ef777570fdaed85c1461df07a72ae1339d26e872c30b6f0f",
+      "nested_prefix": true
+    }
+  ]
+}
