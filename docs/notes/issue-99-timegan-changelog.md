@@ -408,3 +408,97 @@ Nothing failed in this step.
 - The Step 2 estimate from 2,000 rows (26 minutes for 100 epochs) matches this measurement.
   The real wall time of the full run is to be reported from the run itself, not from this
   table.
+
+## Entry 5 — 2026-11-20 — Step 5 full Default run
+
+### Built
+
+- `eda/timegan_default/run_timegan_default.py`, modelled on `eda/wgan_bank/run_wgan_bank.py`.
+  Arguments: `--epochs` (required), `--seed 42`, `--device cpu`, `--hidden-dim 48`,
+  `--batch-size 128`. It reads `train_cleaned.csv` only.
+- Outputs of the run, all committed:
+  - `eda/timegan_default/artifacts/timegan_losses.csv` (300 rows: 100 per phase)
+  - `eda/timegan_default/artifacts/timegan_default.pkl` (820 KB)
+  - `eda/timegan_default/artifacts/loss_curves.png` (three panels, log scale)
+  - `eda/timegan_default/artifacts/run_meta.json`
+  - `eda/timegan_default/artifacts/run.log`
+  - `data/interim/default/synthetic/default_timegan_fill10.csv` (1,004 rows, 25 columns)
+
+### Worked
+
+- Command: `uv run --no-sync python eda/timegan_default/run_timegan_default.py --epochs 100
+  --seed 42 --device cpu --hidden-dim 48 --batch-size 128`, run in the background, exit 0.
+- **Wall time: 1,541.6 s (25.7 minutes)** for 100 epochs per phase on 18,000 rows, CPU,
+  8 torch threads. The Step 4 projection was 1,588 s.
+- Final loss of each phase (epoch 100):
+
+  | Phase | Loss | Epoch 1 | Epoch 100 |
+  | --- | --- | --- | --- |
+  | autoencoder | Embedder | 2.5382 | 0.5001 |
+  | supervised | Supervised | 0.0244 | 0.0006 |
+  | joint | Generator | 20.1341 | 13.7968 |
+  | joint | Discriminator | 1.8474 | 1.1029 |
+  | joint | Embedder | 0.4990 | 0.2803 |
+  | joint | Supervised | 0.0009 | 0.0022 |
+
+- Fill count: `fill_counts` and `fill_rows` both give 1,004.
+- Diagnostic, 5,000 unfiltered rows (seed 43): `y == 1` share 0.1240 against 0.2212 in the
+  real rows; rule violation rate 0.0000 for every rule; every row distinct; no copy of a
+  train row.
+- Fill sampler (seed 42): 9,995 rows drawn in 2 rounds, 1,217 passed the filter, keep rate
+  0.1218, 1,004 returned, 0.18 s.
+- The reread file passed all nine checks: 1,004 rows; train columns plus `is_synthetic`;
+  train dtypes; every `y` is 1; every `is_synthetic` is 1; no missing values; no copy of a
+  train row; no repeated row; no rule broken.
+- Checked separately after the run: loading `timegan_default.pkl` and sampling again with the
+  same seed and filter gives the committed fill file exactly.
+- Before the real run, a 3-epoch dry run into a temporary folder passed every step.
+- The script does not load LightGBM. `uv run pytest tests/tools/test_timegan.py`: 156 passed.
+  Ruff passes on the script; the whole tree still has the 51 baseline errors.
+
+### Failed
+
+Nothing stopped the run. These are quality findings, not failures of the code:
+
+- **The generator loss did not fall in the joint phase.** Its lowest value was 12.55 at
+  epoch 4. It ended at 13.80, and the mean of the last 10 epochs was 17.37. The supervised
+  loss rose in the joint phase from 0.0009 to 0.0022.
+- **Too few positives.** 12.4% of unfiltered rows have `y == 1`, against 22.1% real.
+- **The fill rows do not match the real positive rows on several columns:**
+
+  | Column | Real positives | Fill file |
+  | --- | --- | --- |
+  | SEX = 2 share | 0.560 | 0.986 |
+  | MARRIAGE = 2 share | 0.505 | 0.837 |
+  | EDUCATION values seen | 1 to 6 | 1 to 3 |
+  | PAY_1 values seen | -2 to 8 | -1 to 3 |
+  | BILL_AMT1 mean, std | 48,527, 72,512 | 16,617, 14,865 |
+  | PAY_AMT1 mean, std | 3,553, 11,082 | 2,897, 3,174 |
+  | LIMIT_BAL mean, std | 129,593, 115,736 | 175,397, 186,730 |
+
+  The spread of the bill and payment amounts is a fifth to a quarter of the real spread.
+
+### Decisions
+
+- **Static columns are named in the runner** (`LIMIT_BAL, SEX, EDUCATION, MARRIAGE, AGE`), the
+  target comes from `DATASETS["default"]`, and the monthly columns from
+  `DEFAULT_WIDE_TEMPORAL`. The tool stays free of Default names.
+- **Seeds.** The fill file uses `--seed` (42). The unfiltered diagnostic uses seed + 1 (43), so
+  it is not the same draw as the fill.
+- **Keep rate** is counted by wrapping the row filter: rows that passed the filter over rows
+  drawn. The sampler does not report it.
+- **The loss curves are drawn before sampling**, so they exist even if the fill step stops
+  the run.
+- **The diagnostic also records variety**: distinct values per coded column, share of distinct
+  rows, and copies of train rows. In the unfiltered sample EDUCATION has 5 of 7 values,
+  MARRIAGE 3 of 4, and `PAY_1` to `PAY_6` 8 to 10 of 10 or 11.
+- **Extra file checks** beyond the step's list: dtypes, no repeated row, no rule broken.
+- The run log is committed with the artifacts. It holds absolute paths of this machine.
+
+### Open questions
+
+- **Is 100 epochs the right count?** The joint phase did not improve the generator loss after
+  epoch 4, so more epochs of the same kind may not help. Step 6 measures fidelity; the
+  mismatches above suggest the scorecard will fail on SEX, MARRIAGE and the amount columns.
+- **Whether these fill rows help or hurt PR-AUC** is for Step 7. Rows that are 98.6% one sex
+  and have narrow amounts may add little signal.

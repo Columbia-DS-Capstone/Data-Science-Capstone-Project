@@ -1,0 +1,27 @@
+2026-11-20 01:23:10,164 INFO Training split: 18000 rows (3982 positive, 14018 negative)
+2026-11-20 01:23:10,165 INFO Steps, oldest first: [['PAY_6', 'BILL_AMT6', 'PAY_AMT6'], ['PAY_5', 'BILL_AMT5', 'PAY_AMT5'], ['PAY_4', 'BILL_AMT4', 'PAY_AMT4'], ['PAY_3', 'BILL_AMT3', 'PAY_AMT3'], ['PAY_2', 'BILL_AMT2', 'PAY_AMT2'], ['PAY_1', 'BILL_AMT1', 'PAY_AMT1']]
+2026-11-20 01:23:10,165 INFO Training: 100 epochs per phase, batch size 128, hidden size 48, seed 42, device cpu
+2026-11-20 01:49:16,925 INFO TimeGAN trained on 18000 rows, 6 steps x 9 features, device=cpu in 1540.8s; final G=13.797 D=1.103 E=0.280
+2026-11-20 01:49:16,939 INFO Training wall time: 1541.6 s
+2026-11-20 01:49:16,965 INFO Final losses, autoencoder phase: {'Embedder Loss': 0.5001358349408422}
+2026-11-20 01:49:16,965 INFO Final losses, supervised phase: {'Supervised Loss': 0.0005560673885546}
+2026-11-20 01:49:16,965 INFO Final losses, joint phase: {'Generator Loss': 13.796841430664063, 'Discriminator Loss': 1.102859783598355, 'Embedder Loss': 0.2803218139601605, 'Supervised Loss': 0.0022320980364124}
+2026-11-20 01:49:17,487 INFO Loss curves saved to /Users/akritiagarwal/Desktop/ds capstone/Data-Science-Capstone-Project/eda/timegan_default/artifacts/loss_curves.png
+2026-11-20 01:49:17,489 INFO Fill count at 10%: 1004 rows
+2026-11-20 01:49:17,597 INFO Unfiltered sample of 5000 rows: y == 1 share 0.1240 (real 0.2212), rule violation rate 0.0000
+2026-11-20 01:49:17,774 INFO Sampler: 9995 rows drawn in 2 rounds, 1217 passed the filter (keep rate 0.1218), 1004 returned
+2026-11-20 01:49:17,778 INFO Fill file written to /Users/akritiagarwal/Desktop/ds capstone/Data-Science-Capstone-Project/data/interim/default/synthetic/default_timegan_fill10.csv
+2026-11-20 01:49:17,799 INFO PASS row_count_equals_fill_count
+2026-11-20 01:49:17,799 INFO PASS columns_are_train_columns_plus_is_synthetic
+2026-11-20 01:49:17,799 INFO PASS dtypes_match_train
+2026-11-20 01:49:17,799 INFO PASS every_target_is_positive
+2026-11-20 01:49:17,799 INFO PASS every_is_synthetic_is_1
+2026-11-20 01:49:17,799 INFO PASS no_missing_values
+2026-11-20 01:49:17,799 INFO PASS no_exact_copy_of_a_train_row
+2026-11-20 01:49:17,799 INFO PASS no_repeated_row
+2026-11-20 01:49:17,799 INFO PASS no_default_rule_broken
+2026-11-20 01:49:17,808 INFO run_meta.json written to /Users/akritiagarwal/Desktop/ds capstone/Data-Science-Capstone-Project/eda/timegan_default/artifacts/run_meta.json
+
+Wall time: 1541.6 s
+Artifacts: /Users/akritiagarwal/Desktop/ds capstone/Data-Science-Capstone-Project/eda/timegan_default/artifacts
+Fill file: /Users/akritiagarwal/Desktop/ds capstone/Data-Science-Capstone-Project/data/interim/default/synthetic/default_timegan_fill10.csv
