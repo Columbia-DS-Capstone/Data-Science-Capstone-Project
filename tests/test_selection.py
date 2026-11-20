@@ -151,7 +151,7 @@ def test_default_complete_block_selects_timegan():
     ))
     _assert_dcgan_excluded(result)
     assert result.generator == "timegan"
-    assert result.trainable is False
+    assert result.trainable is True
     assert result.fallback == "ctgan"
     assert "monthly" in result.scope
     conditions = _step(result, "temporal_test").inputs
@@ -398,6 +398,8 @@ class _Gan:
         self.sample_options = []
         self.wgan_trains = []
         self.wgan_samples = []
+        self.timegan_trains = []
+        self.timegan_samples = []
 
     def train(self, train_df, target_col, **kwargs):
         self.trains.append((train_df.copy(), kwargs))
@@ -442,6 +444,25 @@ class _Gan:
         frame[IS_SYNTHETIC] = 1
         return frame
 
+    def timegan_train(self, train_df, target_col, static_columns, step_columns, **kwargs):
+        laid_out = [list(step) for step in step_columns]
+        self.timegan_trains.append((list(static_columns), laid_out, kwargs))
+        log_path = kwargs.get("log_path")
+        if log_path is not None:
+            pd.DataFrame({"Phase": ["joint"], "Epoch": [1]}).to_csv(log_path, index=False)
+        return SimpleNamespace(target_col=target_col, columns=list(train_df.columns))
+
+    def timegan_save(self, model, path):
+        Path(path).write_bytes(b"timegan")
+
+    def timegan_sample(self, model, n, *, seed, row_filter=None, drop_duplicates_of=None, **kwargs):
+        from agentic_gan.utils.synthetic import IS_SYNTHETIC
+        self.timegan_samples.append(n)
+        frame = pd.DataFrame({name: [1] * n for name in drop_duplicates_of.columns})
+        frame[model.target_col] = 1
+        frame[IS_SYNTHETIC] = 1
+        return frame
+
 
 @pytest.fixture
 def gan(monkeypatch):
@@ -452,6 +473,9 @@ def gan(monkeypatch):
     monkeypatch.setattr("agentic_gan.tools.wgan_gp.train_wgan_gp", tool.wgan_train)
     monkeypatch.setattr("agentic_gan.tools.wgan_gp.save_model", tool.wgan_save)
     monkeypatch.setattr("agentic_gan.tools.wgan_gp.sample_wgan_gp", tool.wgan_sample)
+    monkeypatch.setattr("agentic_gan.tools.timegan.train_timegan", tool.timegan_train)
+    monkeypatch.setattr("agentic_gan.tools.timegan.save_model", tool.timegan_save)
+    monkeypatch.setattr("agentic_gan.tools.timegan.sample_timegan", tool.timegan_sample)
     return tool
 
 
@@ -636,7 +660,7 @@ def test_missing_values_do_not_train(tmp_path, gan):
     assert gan.trains == []
 
 
-def test_default_selects_timegan_and_does_not_train(tmp_path, gan):
+def test_default_selects_timegan_and_trains_it(tmp_path, gan):
     rows, positives = 2000, 600
     frame = pd.DataFrame({name: range(rows) for name in DEFAULT_WIDE_TEMPORAL})
     frame["SEX"] = 1
@@ -644,10 +668,18 @@ def test_default_selects_timegan_and_does_not_train(tmp_path, gan):
     config = _config(tmp_path, dataset_name="default", target="y", positive_class=1)
     request, run, _path = _request(tmp_path, config, frame, positives, rows - positives)
     output = run_model_selection(request, run)
-    assert output.status is Status.SKIPPED
+    assert output.status is Status.SUCCESS
     assert output.generator == "timegan"
-    assert "ctgan" in output.reason
+    assert gan.timegan_trains
     assert gan.trains == []
+    assert Path(output.checkpoint_path).exists()
+    assert Path(output.loss_history_path).exists()
+    assert len(output.synthetic_sets) == len(config.fill_levels)
+    for item in output.synthetic_sets:
+        assert Path(item.path).exists()
+    static, steps, _kwargs = gan.timegan_trains[0]
+    assert static == ["SEX"]
+    assert steps[0] == ["PAY_6", "BILL_AMT6", "PAY_AMT6"]
 
 
 def test_constant_polish_cohort_does_not_make_ratios_mixed(tmp_path, gan):
@@ -983,7 +1015,7 @@ def test_timegan_explanation_must_echo_timegan(tmp_path, gan):
     assert fake.calls[0][2] is SelectionExplanation
     assert _llm_steps(run).outcome.iloc[0]["generator"] == "timegan"
     assert output.generator == "timegan"
-    assert output.status is Status.SKIPPED
+    assert output.status is Status.SUCCESS
     assert gan.trains == []
 
 
@@ -1738,7 +1770,7 @@ def test_mixed_selects_ctgan_trainable_fallback_wgan_gp():
     assert result.fallback == "wgan_gp"
 
 
-def test_default_complete_selects_timegan_not_trainable():
+def test_default_complete_selects_timegan_trainable():
     result = select_generator(_data(
         dataset="default",
         rows=10000,
@@ -1755,7 +1787,7 @@ def test_default_complete_selects_timegan_not_trainable():
         repeated_observation=True,
     ))
     assert result.generator == "timegan"
-    assert result.trainable is False
+    assert result.trainable is True
     assert result.fallback == "ctgan"
 
 
@@ -1766,7 +1798,7 @@ def test_wgan_gp_fallback_message_no_longer_says_not_implemented():
     assert "implemented" in fallback_step.rationale.lower()
 
 
-def test_timegan_fallback_message_still_says_not_implemented():
+def test_timegan_fallback_message_says_implemented():
     result = select_generator(_data(
         dataset="default",
         rows=10000,
@@ -1783,7 +1815,8 @@ def test_timegan_fallback_message_still_says_not_implemented():
         repeated_observation=True,
     ))
     fallback_step = _step(result, "fallback")
-    assert "not implemented" in fallback_step.rationale.lower()
+    assert "not implemented" not in fallback_step.rationale.lower()
+    assert "implemented" in fallback_step.rationale.lower()
 
 
 def test_backup_eligible_true_for_bank_like_mixed():
@@ -1833,9 +1866,10 @@ def test_backup_eligible_false_when_fallback_is_not_wgan_gp():
 
 
 def test_rule_hash_stable_after_step7(tmp_path):
-    # Covers WGAN defaults, the dataset recipe, and targeted retry options. Moved when the recipe
-    # gained selection_mode, pool_multiplier, boundary_low and boundary_high (#100).
-    post_step7_hash = "2db59320981cd1d4bcfcfba4724ef04472c6fa5bc9d3b2463ccc4bf13e2faccb"
+    # Covers WGAN defaults, TimeGAN defaults, the dataset recipe, and targeted retry options.
+    # Moved when the recipe gained selection_mode, pool_multiplier, boundary_low and
+    # boundary_high (#100), and again when TimeGAN defaults joined the fingerprint (#137).
+    post_step7_hash = "5dc1af5e0ad81f3b8c706de3991b5c99e95cdbd6d60c673efa0fbab979453623"
     config = _config(tmp_path)
     assert _rule_hash(config) == post_step7_hash
 
@@ -1845,4 +1879,12 @@ def test_changing_wgan_defaults_changes_rule_hash(tmp_path, monkeypatch):
     config = _config(tmp_path)
     original_hash = _rule_hash(config)
     monkeypatch.setattr(ms, "WGAN_DEFAULTS", {**ms.WGAN_DEFAULTS, "epochs": 999})
+    assert _rule_hash(config) != original_hash
+
+
+def test_changing_timegan_defaults_changes_rule_hash(tmp_path, monkeypatch):
+    from agentic_gan.agents import model_selection as ms
+    config = _config(tmp_path)
+    original_hash = _rule_hash(config)
+    monkeypatch.setattr(ms, "TIMEGAN_DEFAULTS", {**ms.TIMEGAN_DEFAULTS, "epochs": 999})
     assert _rule_hash(config) != original_hash

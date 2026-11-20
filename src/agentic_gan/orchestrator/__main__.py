@@ -2,7 +2,7 @@
 
 import argparse
 
-from .graph import build_graph, config_for_dataset, run_pipeline
+from agentic_gan.utils.openmp import use_shared_openmp
 
 
 def main():
@@ -12,6 +12,10 @@ def main():
         "--diagram", action="store_true", help="print the LangGraph Mermaid diagram"
     )
     args = parser.parse_args()
+    # On macOS this restarts the interpreter once, so it runs before the heavy imports.
+    use_shared_openmp()
+    from .graph import build_graph, config_for_dataset, run_pipeline  # noqa: PLC0415
+
     if args.diagram:
         print(build_graph().get_graph().draw_mermaid())
         return 0
