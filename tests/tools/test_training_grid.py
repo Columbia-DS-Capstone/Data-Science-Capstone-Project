@@ -84,9 +84,25 @@ def test_fine_grid_uses_nested_prefixes_of_one_pool(tmp_path):
         levels,
         "data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill",
         tmp_path,
+        synthetic_weight=0.25,
     )
+    assert request.config.synthetic_weight == 0.25
     pool = pd.read_csv(ROOT / "data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill25.csv")
     for item in request.accepted_synthetic:
         actual = pd.read_csv(run.root / item.path)
         pd.testing.assert_frame_equal(actual, pool.head(item.rows))
     assert "2.5" in request.accepted_synthetic[1].path.name
+
+
+def test_save_results_keeps_distinct_synthetic_weights(tmp_path):
+    out = tmp_path / "weighted_results"
+    for weight in (1.0, 0.25, 0.5):
+        result = _result(tmp_path, "bank", [weight])
+        metrics = pd.read_csv(result.metrics_path).assign(synthetic_weight=weight)
+        metrics.to_csv(result.metrics_path, index=False)
+        save_results(result, "bank", [42], 5.0, out)
+    saved = pd.read_csv(out / "training_all_arms.csv")
+    assert set(saved.synthetic_weight) == {1.0, 0.25, 0.5}
+    assert len(saved) == 3
+    times = pd.read_csv(out / "training_run_times.csv")
+    assert set(times.synthetic_weight) == {1.0, 0.25, 0.5}

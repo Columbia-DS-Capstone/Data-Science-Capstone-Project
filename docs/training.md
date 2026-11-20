@@ -341,3 +341,48 @@ exact ties prefer the smaller fill. With no eligible candidate, the decision is
 The cross-dataset chart derives its fill ticks from the data, including 1%, 2.5%
 and 5%, and retains the dotted cleaned reference line. Orchestrator integration
 is owned by #134.
+
+### Down-weight synthetic training rows (#135)
+
+`RunConfig.synthetic_weight` and `training_grid --synthetic-weight` accept a value
+in `(0, 1]` (default `1.0`). Real rows retain weight 1.0; synthetic rows receive the
+requested weight in the estimator's training loss. Encoding and evaluation rows
+remain governed by the existing training-only preprocessing and frozen thresholds.
+`tools.augmented` also accepts `--synthetic-weight`.
+
+The default and real-only fits use the original unweighted fit call, preserving
+predictions exactly. Other fits pass `sample_weight` to the final pipeline step.
+For stacking, a pipeline adapter forwards it to each base estimator, including
+inner-fold fits; scikit-learn also weights the final estimator. Repeated CV and
+`augmented`'s outer CV slice the weights with their training folds.
+
+Metrics and model records include `synthetic_weight` and `weight_applied`.
+`weight_applied=True` means the requested objective was honored (including the
+all-unit or real-only case). If any stacking base or final estimator cannot accept
+weights, that entire model uses the unweighted objective, names the unsupported
+estimators in a warning, and reports `weight_applied=False`. Failed fits also start
+with that flag false. The shipped four-model suite supports weights in the installed
+scikit-learn 1.9.1 environment; tests check base, inner-fold and final fits.
+
+The baseline protocol file and thresholds stay immutable. Non-default weights are
+included in a derived training protocol's hash; weight 1.0 keeps the old protocol
+unchanged. Result files retain separate weights on upsert. Filter to one weight per
+dataset before using the evaluation/comparison tools, or use a separate results
+directory per weight, so different objectives are never averaged together.
+
+The Bank weight experiment waits for #36 to merge, as required by #135. After that:
+
+```sh
+for weight in 0.25 0.5 1.0; do
+  uv run python -m agentic_gan.tools.training_grid --dataset bank_marketing --seeds 42 \
+    --fill-levels 0.05 0.10 0.25 --synthetic-weight "$weight" \
+    --ctgan-prefix data/interim/bank_marketing/synthetic/bank_ctgan_v2_fill \
+    --results-dir "results/weights/$weight"
+done
+```
+
+Report validation and test PR-AUC for every selected-model cell, and use #138's
+paired-bootstrap verdict against cleaned on both splits. No weighted Bank result
+is claimed before that experiment is run. #36's Bank cleaned reference is
+validation 0.4500 / test 0.4811; its current grid and decisions are in
+`results/volume/`.

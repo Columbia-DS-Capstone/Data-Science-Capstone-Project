@@ -49,6 +49,7 @@ def build_request(
     runs_dir: Path = ROOT / "runs",
     *,
     ctgan_pool: Path | None = None,
+    synthetic_weight: float = 1.0,
 ) -> tuple[TrainingRequest, RunDir]:
     """Create the run folder and the request for one dataset.
 
@@ -63,6 +64,7 @@ def build_request(
         positive_class="yes" if dataset == "bank_marketing" else 1,
         seeds=seeds,
         fill_levels=list(fill_levels),
+        synthetic_weight=synthetic_weight,
     )
     run = create_run(cfg, runs_dir=runs_dir)
 
@@ -145,11 +147,15 @@ def save_results(
     """Replace this dataset's rows in the results table and its line in the run-time table."""
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics = pd.read_csv(result.metrics_path)
+    if "synthetic_weight" not in metrics:
+        metrics["synthetic_weight"] = 1.0
+    weight = float(metrics["synthetic_weight"].iloc[0])
     paths = (out_dir / "training_all_arms.csv", out_dir / "training_run_times.csv")
     times = pd.DataFrame(
         [
             {
                 "dataset": dataset,
+                "synthetic_weight": weight,
                 "seeds": len(seeds),
                 "model_fits": len(result.records),
                 "seconds": round(seconds, 1),
@@ -159,7 +165,11 @@ def save_results(
     for path, new in zip(paths, (metrics, times), strict=True):
         if path.exists():
             old = pd.read_csv(path)
-            new = pd.concat([old[old["dataset"] != dataset], new], ignore_index=True)
+            if "synthetic_weight" not in old:
+                old["synthetic_weight"] = 1.0
+            old["synthetic_weight"] = old["synthetic_weight"].fillna(1.0)
+            keep = old["dataset"].ne(dataset) | old["synthetic_weight"].ne(weight)
+            new = pd.concat([old[keep], new], ignore_index=True)
         new.to_csv(path, index=False)
 
 
@@ -171,6 +181,7 @@ def main() -> None:
     ctgan = parser.add_mutually_exclusive_group()
     ctgan.add_argument("--ctgan-prefix", help="CTGAN file prefix, followed by percent and .csv")
     ctgan.add_argument("--ctgan-pool", type=Path, help="one pool covering the largest fill")
+    parser.add_argument("--synthetic-weight", type=float, default=1.0)
     parser.add_argument("--runs-dir", type=Path, default=ROOT / "runs")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--no-save", action="store_true", help="do not update results/")
@@ -183,6 +194,7 @@ def main() -> None:
         args.ctgan_prefix,
         args.runs_dir,
         ctgan_pool=args.ctgan_pool,
+        synthetic_weight=args.synthetic_weight,
     )
     start = time.perf_counter()
     result = run_training(request, run)
