@@ -716,3 +716,56 @@ generator loss.
 
 - Approval of the issue comment, and who posts it (`gh auth login`, or paste by hand).
 - Whether to push the branch now, so the image link resolves and the draft PR shows the run.
+
+## Entry 9 — 2026-11-20 — Step 9 final verification
+
+### Built
+
+No code changed. The PR description was written and kept outside the repository, so the diff
+against `main` stays the list in check 3.
+
+### Worked
+
+- **Ruff.** `uv run ruff check src tests`: 51 errors, all in `src/agentic_gan/web.py`, which
+  is identical to `main`. The two TimeGAN files pass.
+- **Tests, one process per test file:** 40 files, every one exit 0. **1,067 passed,
+  3 skipped, 1 xfailed**, which is all 1,071 collected tests. `tests/tools/test_timegan.py`:
+  156 passed. The 3 skips and the xfail are in `test_quality_agent.py`, `test_selection.py`,
+  `test_training_agent.py` and `test_orchestrator.py`, none of them touched here.
+- **Diff against `main`** (`fedde3a`, also `origin/main`): 14 files, all added, all in the
+  allowed list: `src/agentic_gan/tools/timegan.py`, `tests/tools/test_timegan.py`,
+  `eda/timegan_default/run_timegan_default.py`, eight files in
+  `eda/timegan_default/artifacts/`, `data/interim/default/synthetic/default_timegan_fill10.csv`,
+  `docs/notes/timegan_default.md` and this file. No forbidden file is in the diff.
+- **Selection.** `tools/selection.py` line 318 still says "TimeGAN is not implemented.
+  Documented fallback is CTGAN." `tests/test_selection.py` has no diff against `main` and
+  passes: 111 passed, 1 skipped.
+
+### Failed
+
+- **`uv run pytest -q --tb=short` as one process does not finish on this machine.** It ends
+  with a segmentation fault (exit 139) in
+  `tests/test_training_agent.py::test_real_four_model_suite_smoke`, inside LightGBM's `fit`,
+  after 674 tests passed and before any TimeGAN test started.
+- **`main` has the same crash.** The run without `tests/tools/test_timegan.py`, which is
+  exactly `main`'s suite because this branch only adds files, crashes at the same test after
+  the same 674 passes. Collecting `test_timegan.py` does not load torch. The cause is torch
+  and LightGBM in one process on macOS (rule 7): an earlier test file loads torch, then
+  LightGBM crashes. The Step 0 baseline ran three test files, not the whole suite, so this
+  was not seen then.
+- So the check "everything must pass" holds per file, and does not hold for the single
+  command as written. Nothing was changed to work around it; the fix belongs to the test
+  setup on `main`, not to this issue.
+
+### Decisions
+
+- Counts are reported from the per-file run, with the crash stated beside them.
+- Pushing is part of this step. The issue comment stays unposted until it is approved.
+
+### Open questions
+
+- **May this merge during the freeze?** The freeze began Thu Nov 19 at 21:00. Kyle's call.
+- **The single-process test crash on macOS** needs an owner. Does CI (Linux) run the whole
+  suite in one process without it?
+- `gh` is not logged in, so the PR and the review request have to be made by hand or after
+  `gh auth login`.
